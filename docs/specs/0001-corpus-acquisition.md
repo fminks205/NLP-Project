@@ -64,6 +64,16 @@ safe depth limit (`Physicists by nationality` → country categories → unrelat
 the category graph contains cycles. Excluding all of this by category blocklist means
 maintaining a blocklist forever; `P31 = Q5` excludes it structurally.
 
+**Two constraints discovered while implementing this** (2026-08-12), both now
+encoded in the query file and the seed stage:
+
+- The query must **not** use `SERVICE wikibase:label`. With it, the full query runs 67s
+  and is truncated by the WDQS timeout; without it, 9.6s and a clean result. Display
+  names are taken from the article title instead, which is the same string a reader sees.
+- **WDQS signals that timeout as HTTP 200.** It streams results and appends a Java stack
+  trace to the partial JSON. A client that only checks the status code silently accepts an
+  incomplete corpus, so `WikiClient.sparql` detects the truncation markers and raises.
+
 Selecting via Wikidata also yields, for free:
 
 - a **QID per person** — the identifier the entity-linking stage will need anyway,
@@ -143,6 +153,22 @@ Subclass traversal adds **3,187 people (+26.6%)** — astrophysicists, theoretic
 physicists, and similar. Both numbers are small enough that the full corpus is
 tractable; the choice between them is a scope question, not a feasibility one.
 
+**Projected download size** (measured 2026-08-12 by `inpnet estimate` over the full
+subclass seed list). The wikitext total is *measured, not estimated* — the Action API's
+`prop=info` returns each page's exact wikitext byte count, 50 titles per request:
+
+| | |
+|---|---|
+| Articles resolved | 15,157 (0 missing, 27 redirects) |
+| Wikitext total | **151.6 MB** (exact) |
+| Wikitext mean / median / max | 10.2 KB / 7.1 KB / 269 KB |
+| HTML : wikitext ratio | **7.87×** (size-weighted, sampled on 40 articles) |
+| **Projected HTML** | **~1.2 GB** |
+
+Sampling for that ratio must be drawn from the real seed list. Famous physicists
+(Einstein, Curie) average ~120 KB of wikitext against the corpus mean of 10.2 KB, so a
+sample of well-known names overshoots the projection by roughly 10×.
+
 ### 5. Scope — full seed list, bounded text fetch first
 
 The `seed` stage runs over the complete result set: it is one query and costs nothing.
@@ -168,14 +194,22 @@ must never force a re-fetch — that separation is the whole reason these are no
 ```jsonc
 {
   "qid": "string — Wikidata QID, the stable id used everywhere downstream",
-  "title": "string — English Wikipedia article title",
-  "label": "string — English label",
+  "title": "string — English Wikipedia article title, also used as display name",
   "birth_year": "int|null",
   "death_year": "int|null",
-  "gender": "string|null — QID; kept for the coverage-bias analysis",
-  "occupations": ["string — QID"]
+  "gender": "string|null — QID; kept for the coverage-bias analysis"
 }
 ```
+
+No `occupations` field: aggregating it with `GROUP_CONCAT` pushes the query past the
+WDQS timeout. It is recoverable later per-QID if a stage actually needs it, and nothing
+currently does — the bias analysis needs gender and birth year, which are present.
+
+**Deduplication is mandatory, not defensive.** The `OPTIONAL` clauses emit a row per
+combination, so the query returns **18,178 rows for 15,158 distinct people**; 2,625
+people carry more than one row because Wikidata holds several birth dates or genders for
+them. The seed stage keeps the first value per field, fills gaps from later rows, and
+sorts by QID so output is byte-stable across runs.
 
 **`fetch_log.jsonl`** — one object per attempt, so failures are data rather than lost:
 
@@ -258,15 +292,24 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
 
 - [x] Corpus size measured with [`physicists-count.rq`](../queries/physicists-count.rq);
       both counts recorded in §Decision 4 — 11,971 strict / 15,158 with subclasses.
-- [ ] `seed.jsonl` produced for the full result set, matching the schema above.
-- [ ] Every successfully fetched document carries a `revision_id` and a permanent `oldid` URL.
-- [ ] Re-running `clean` on an unchanged raw snapshot produces byte-identical output.
-- [ ] Link offsets round-trip: `section.text[start:end] == surface` for every link (unit test).
-- [ ] Cleaning hand-verified on 10 articles of varying length: no navboxes, no reference
-      lists, no `See also` sections, and no dropped prose paragraphs.
-- [ ] Fetcher sends a contact `User-Agent`, rate-limits, and retries with backoff.
-- [ ] Failed and redirected fetches appear in `fetch_log.jsonl` rather than vanishing.
-- [ ] Manifests written for all three stages, including the seed query and its date.
+- [x] `seed.jsonl` produced for the full result set (15,158 people), matching the schema above.
+- [x] Every successfully fetched document carries a `revision_id` and a permanent `oldid` URL.
+- [x] Re-running `clean` on an unchanged raw snapshot produces byte-identical output
+      (verified by SHA-256 over two consecutive runs).
+- [x] Link offsets round-trip **and** carry no surrounding whitespace — the second check
+      exists because round-tripping alone passed while offsets and surface were both
+      wrong by one character. See `verify_offsets` and its regression tests.
+- [x] Fetcher sends a contact `User-Agent`, rate-limits, and retries with backoff
+      honouring `Retry-After`.
+- [x] Manifests written for all three stages, including the seed query and its date.
+- [ ] Cleaning hand-verified on 10 articles of varying length. **Partial:** one article
+      read in full, plus an automated artefact scan across 40 articles (no `[edit]`,
+      `ISBN`, `doi:`, `Retrieved`, or `Archived from` in 129k chars of output). The
+      10-article manual read has not been done.
+- [ ] Failed fetches appear in `fetch_log.jsonl` — **done for errors, not for redirects.**
+      The REST HTML endpoint follows redirects transparently, so `fetch` cannot see them;
+      `estimate` detects them via `prop=info` (27 in the corpus). See *Open questions*.
+- [ ] Full-corpus fetch. Only a 40-article subset has been fetched so far, per §Decision 5.
 
 ## Open questions
 
@@ -278,8 +321,11 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
   length, or by link degree within the seed set? A random sample is the defensible default
   unless there is a reason to stratify. Note the full corpus is now known to be tractable,
   so the subset is about iterating quickly, not about affordability.
-- **Redirects and disambiguation**: follow redirects silently, or record and skip? Current
-  schema records them; the policy is undecided.
+- **Redirects**: 27 of 15,157 seed titles redirect. Wikidata sitelinks are almost always
+  canonical, so this is a small effect — but the REST HTML endpoint follows redirects
+  transparently, so `fetch` records the *requested* title while the content is the
+  target's. Options: pre-resolve via `prop=info` during `seed`, or accept it and note it.
+  Low stakes, but currently silent, which is the part worth fixing.
 - **Minimum article length** to exclude stubs — or keep stubs and let downstream stages
   ignore them?
 - **Category-tree coverage comparison**: worth fetching category membership separately to
@@ -302,3 +348,13 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
 - 2026-08-12 — corpus size measured against WDQS: 11,971 strict / 15,158 with subclass
   traversal. Verified the HTML endpoint's `ETag` carries the revision id, so fetching is
   one request per article rather than two.
+- 2026-08-12 — implemented as `inpnet seed|estimate|fetch|clean` and run end-to-end.
+  Spec revised from what the implementation found:
+  - Removed `SERVICE wikibase:label` from the seed query (67s + truncated → 9.6s + clean)
+    and dropped `occupations` from `seed.jsonl` (`GROUP_CONCAT` exceeds the WDQS timeout).
+  - Recorded that WDQS reports timeouts as HTTP 200 with a truncated stream, and that the
+    client must detect it.
+  - Recorded that `OPTIONAL` clauses duplicate rows (18,178 → 15,158; 2,625 affected).
+  - Added the measured download projection: 151.6 MB wikitext → ~1.2 GB HTML at 7.87×.
+  - Strengthened the link-span check after finding spans that round-tripped while being
+    shifted one character onto preceding whitespace.

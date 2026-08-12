@@ -1,13 +1,24 @@
-# Seed query for spec 0001 — corpus acquisition.
+# Seed query for spec 0001 -- corpus acquisition.
 #
 # Selects every human whose occupation is physicist (or any subclass thereof)
 # and who has an article on English Wikipedia.
 #
 # Run against https://query.wikidata.org/sparql
+#
+# NOTE: deliberately does NOT use SERVICE wikibase:label. Measured 2026-08-12:
+# with the label service this query takes 67s and is TRUNCATED by the WDQS
+# timeout (which arrives as HTTP 200 with a Java stack trace appended to a
+# partial result stream); without it, 9.6s and a clean result. Display names
+# are derived from the article title instead.
+#
 # The P31 = Q5 constraint is what keeps fictional characters, films and list
-# articles out of the corpus — see spec 0001 §Decision.
+# articles out of the corpus -- see spec 0001, Decision 1.
+#
+# OPTIONAL clauses multiply rows: 18,178 rows for 15,158 distinct people,
+# because Wikidata holds several birth dates or genders for some. The seed
+# stage deduplicates.
 
-SELECT DISTINCT ?person ?personLabel ?article ?birthYear ?deathYear ?gender ?genderLabel
+SELECT ?person ?article ?birthYear ?deathYear ?gender
 WHERE {
   ?person wdt:P31 wd:Q5 ;                       # instance of: human
           wdt:P106/wdt:P279* wd:Q169470 .       # occupation: physicist (incl. subclasses)
@@ -15,9 +26,7 @@ WHERE {
   ?article schema:about ?person ;
            schema:isPartOf <https://en.wikipedia.org/> .
 
-  OPTIONAL { ?person wdt:P569 ?birth . BIND(YEAR(?birth) AS ?birthYear) }
-  OPTIONAL { ?person wdt:P570 ?death . BIND(YEAR(?death) AS ?deathYear) }
-  OPTIONAL { ?person wdt:P21  ?gender . }
-
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+  OPTIONAL { ?person wdt:P569 ?b . BIND(YEAR(?b) AS ?birthYear) }
+  OPTIONAL { ?person wdt:P570 ?d . BIND(YEAR(?d) AS ?deathYear) }
+  OPTIONAL { ?person wdt:P21  ?gender }
 }

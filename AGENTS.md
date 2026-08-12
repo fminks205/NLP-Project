@@ -65,13 +65,18 @@ NLP-Project/
 ├── AGENTS.md                  # you are here
 ├── CLAUDE.md                  # pointer to this file
 ├── README.md                  # human-facing intro
+├── pyproject.toml             # uv-managed; `uv sync` then `uv run inpnet ...`
 ├── docs/
 │   ├── specs/                 # ← all specs live here
+│   ├── queries/               # SPARQL used by the pipeline, version-controlled
 │   └── paper/                 # (planned) source of the paper
-├── src/                       # (planned) the package — importable, tested code
-├── scripts/                   # (planned) CLI entry points / pipeline stages
+├── src/inpnet/                # the package — importable, tested code
+│   ├── wiki.py                #   Wikimedia API client (spec 0001)
+│   ├── manifest.py            #   run manifests + JSONL helpers
+│   ├── cli.py                 #   `inpnet` entry point
+│   └── corpus/                #   seed / estimate / fetch / clean  (spec 0001)
 ├── notebooks/                 # (planned) exploration only — never imported by src/
-├── tests/                     # (planned)
+├── tests/                     # pytest
 └── data/                      # gitignored, except data/annotations/
     ├── raw/                   #   immutable downloads
     ├── interim/               #   intermediate artifacts
@@ -89,16 +94,23 @@ NLP-Project/
 
 ## 5. Conventions
 
-- **Python.** Package lives under `src/`, tests under `tests/`.
+- **Python 3.13, managed by [uv](https://docs.astral.sh/uv/).** `uv sync` to install,
+  `uv run inpnet ...` to run, `uv run pytest` to test. There is no system Python on this
+  machine — `python` resolves to the Windows Store stub, so always go through `uv run`.
+- Package lives under `src/inpnet/`, tests under `tests/`.
 - **Determinism**: seed everything. A rerun must reproduce the numbers in the paper.
 - **Provenance**: any artifact derived from a source document keeps a traceable link back
   to that document and its version.
 - **Config over constants**: no hardcoded paths or magic thresholds buried in `src/`.
+- **Manifests**: every stage writes `_manifest.json` beside its output — inputs, hashes,
+  config, versions, counts.
+- **Docstrings** on public functions name the spec they implement.
 - **Notebooks** are for exploration and figures. Logic that matters moves into `src/`.
 - **Commits** reference the spec they implement, e.g. `spec 0003: ...`.
 
-Language version, dependency manager, formatter, and test framework are **not yet
-decided** — settle them in a spec before the first real code lands.
+**Network etiquette is a hard requirement, not a nicety.** Wikimedia's User-Agent policy
+requires an identifiable contact; `WikiClient` refuses to construct without one. Pass
+`--contact you@example.org` or set `INPNET_CONTACT`. Never remove the rate limiting.
 
 ## 6. Ethics & licensing
 
