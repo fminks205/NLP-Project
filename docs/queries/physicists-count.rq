@@ -1,0 +1,27 @@
+# Corpus-size measurement for spec 0001, acceptance criterion 1.
+#
+# Returns two counts:
+#   ?strict — occupation is exactly physicist (Q169470)
+#   ?withSubclasses — occupation is physicist or any subclass (astrophysicist,
+#                     theoretical physicist, ...)
+#
+# The gap between them decides the open question in spec 0001 about whether to
+# traverse P279*. Record BOTH numbers in the spec's Changelog when run.
+#
+# Run against https://query.wikidata.org/sparql
+
+SELECT ?strict ?withSubclasses
+WHERE {
+  {
+    SELECT (COUNT(DISTINCT ?p) AS ?strict) WHERE {
+      ?p wdt:P31 wd:Q5 ; wdt:P106 wd:Q169470 .
+      ?a schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> .
+    }
+  }
+  {
+    SELECT (COUNT(DISTINCT ?p) AS ?withSubclasses) WHERE {
+      ?p wdt:P31 wd:Q5 ; wdt:P106/wdt:P279* wd:Q169470 .
+      ?a schema:about ?p ; schema:isPartOf <https://en.wikipedia.org/> .
+    }
+  }
+}

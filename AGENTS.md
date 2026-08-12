@@ -49,11 +49,11 @@ commit as the code.
 
 ## 3. Spec index
 
-*No specs written yet.* Add a row here in the same commit as any new spec.
+Add a row here in the same commit as any new spec.
 
 | ID | Spec | Status | What it decides |
 |----|------|--------|-----------------|
-| — | — | — | — |
+| 0001 | [Corpus acquisition](docs/specs/0001-corpus-acquisition.md) | Draft | Which Wikipedia articles, how they're selected, fetched, and cleaned |
 
 ## 4. Repository layout
 

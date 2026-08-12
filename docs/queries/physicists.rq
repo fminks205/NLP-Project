@@ -1,0 +1,23 @@
+# Seed query for spec 0001 — corpus acquisition.
+#
+# Selects every human whose occupation is physicist (or any subclass thereof)
+# and who has an article on English Wikipedia.
+#
+# Run against https://query.wikidata.org/sparql
+# The P31 = Q5 constraint is what keeps fictional characters, films and list
+# articles out of the corpus — see spec 0001 §Decision.
+
+SELECT DISTINCT ?person ?personLabel ?article ?birthYear ?deathYear ?gender ?genderLabel
+WHERE {
+  ?person wdt:P31 wd:Q5 ;                       # instance of: human
+          wdt:P106/wdt:P279* wd:Q169470 .       # occupation: physicist (incl. subclasses)
+
+  ?article schema:about ?person ;
+           schema:isPartOf <https://en.wikipedia.org/> .
+
+  OPTIONAL { ?person wdt:P569 ?birth . BIND(YEAR(?birth) AS ?birthYear) }
+  OPTIONAL { ?person wdt:P570 ?death . BIND(YEAR(?death) AS ?deathYear) }
+  OPTIONAL { ?person wdt:P21  ?gender . }
+
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+}
