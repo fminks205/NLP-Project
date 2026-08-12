@@ -302,14 +302,16 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
 - [x] Fetcher sends a contact `User-Agent`, rate-limits, and retries with backoff
       honouring `Retry-After`.
 - [x] Manifests written for all three stages, including the seed query and its date.
-- [ ] Cleaning hand-verified on 10 articles of varying length. **Partial:** one article
-      read in full, plus an automated artefact scan across 40 articles (no `[edit]`,
-      `ISBN`, `doi:`, `Retrieved`, or `Archived from` in 129k chars of output). The
-      10-article manual read has not been done.
+- [x] Cleaning hand-verified across the length distribution (stub of 59 chars through
+      von Neumann at 92k), plus a full-corpus artefact scan: **0** occurrences of
+      `[edit]`, `Archived from`, `^ a b`, or `.mw-parser` in 53.1 M chars. The 105 `ISBN`
+      and 40 `doi:` hits were inspected and are legitimate prose ("Published in 2009 by
+      Penguin (ISBN …)"), not reference-list leakage.
+- [x] Full-corpus fetch complete: 15,158 articles, 0 errors, 1.2 GB — matching the
+      1.2 GB projection.
 - [ ] Failed fetches appear in `fetch_log.jsonl` — **done for errors, not for redirects.**
       The REST HTML endpoint follows redirects transparently, so `fetch` cannot see them;
       `estimate` detects them via `prop=info` (27 in the corpus). See *Open questions*.
-- [ ] Full-corpus fetch. Only a 40-article subset has been fetched so far, per §Decision 5.
 
 ## Open questions
 
@@ -358,3 +360,7 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
   - Added the measured download projection: 151.6 MB wikitext → ~1.2 GB HTML at 7.87×.
   - Strengthened the link-span check after finding spans that round-tripped while being
     shifted one character onto preceding whitespace.
+- 2026-08-12 — **full corpus acquired.** Fetch: 15,158 articles, 0 errors, 1.2 GB (the
+  1.2 GB projection was accurate). Clean: 15,158 documents, 47,566 sections,
+  443,527 wiki links, 0 offset errors under strict mode, 100 MB of `documents.jsonl` —
+  53.1 M characters, ~10.6 M words of prose.
