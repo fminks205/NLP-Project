@@ -55,6 +55,7 @@ Add a row here in the same commit as any new spec.
 |----|------|--------|-----------------|
 | 0001 | [Corpus acquisition](docs/specs/0001-corpus-acquisition.md) | Draft | Which Wikipedia articles, how they're selected, fetched, and cleaned |
 | 0002 | [Entity & mention layer](docs/specs/0002-entity-mention-layer.md) | Draft | Which spans are people, how they resolve to Wikidata, candidate pairs |
+| 0003 | [Relation typology](docs/specs/0003-relation-typology.md) | Draft | Field-agnostic sentence clustering, and the contract a domain-specific relation typology plugs into it through |
 
 ## 4. Repository layout
 
