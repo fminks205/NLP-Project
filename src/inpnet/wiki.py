@@ -17,12 +17,16 @@ import requests
 
 WDQS_ENDPOINT = "https://query.wikidata.org/sparql"
 ACTION_API = "https://en.wikipedia.org/w/api.php"
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html/"
 REST_BARE = "https://en.wikipedia.org/w/rest.php/v1/page/{title}/bare"
 PERMALINK = "https://en.wikipedia.org/w/index.php?oldid={revid}"
 
 #: The Action API accepts at most 50 titles per request for anonymous clients.
 TITLES_PER_REQUEST = 50
+
+#: Queries longer than this are POSTed rather than sent in a URL.
+_POST_THRESHOLD = 2000
 
 #: WDQS streams results and, when a query exceeds its server-side timeout,
 #: appends a Java stack trace to the already-emitted JSON *while still
@@ -103,11 +107,15 @@ class WikiClient:
 
     def _get(self, url: str, **kwargs) -> requests.Response:
         """GET with throttling and backoff. Raises WikiError when out of retries."""
+        return self._request("GET", url, **kwargs)
+
+    def _request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """HTTP with throttling and backoff. Raises WikiError when out of retries."""
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             self._throttle()
             try:
-                resp = self.session.get(url, timeout=self.timeout, **kwargs)
+                resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
             except requests.RequestException as exc:
                 last_error = exc
             else:
@@ -131,18 +139,27 @@ class WikiClient:
 
     # -- Wikidata ---------------------------------------------------------
 
-    def sparql(self, query: str) -> list[dict[str, str]]:
+    def sparql(self, query: str, *, method: str | None = None) -> list[dict[str, str]]:
         """Run a SPARQL query, returning one flat dict of bindings per row.
+
+        Long queries — a `VALUES` clause of thousands of QIDs runs to tens of
+        kilobytes — exceed practical GET URL limits, so anything past
+        `_POST_THRESHOLD` is sent as a form-encoded POST. Verified working against
+        WDQS on 2026-08-25.
 
         Raises:
             QueryTruncated: if WDQS timed out mid-stream. See _TRUNCATION_MARKERS —
                 this failure arrives as HTTP 200 and must be detected from the body.
         """
-        resp = self._get(
-            WDQS_ENDPOINT,
-            params={"query": query},
-            headers={"Accept": "application/sparql-results+json"},
-        )
+        if method is None:
+            method = "POST" if len(query) > _POST_THRESHOLD else "GET"
+        headers = {"Accept": "application/sparql-results+json"}
+        if method == "POST":
+            resp = self._request(
+                "POST", WDQS_ENDPOINT, data={"query": query}, headers=headers
+            )
+        else:
+            resp = self._get(WDQS_ENDPOINT, params={"query": query}, headers=headers)
         text = resp.text
         try:
             payload = json.loads(text)
@@ -199,6 +216,85 @@ class WikiClient:
                     ),
                 }
 
+    def page_props(self, titles: Sequence[str]) -> Iterator[dict]:
+        """Yield title -> Wikidata QID, in batches of 50. Implements spec 0002 §Decision 2.
+
+        `redirects=1` resolves redirects, so two requested titles may map to the same
+        QID. That is correct — they are the same entity.
+        """
+        for start in range(0, len(titles), TITLES_PER_REQUEST):
+            batch = list(titles[start : start + TITLES_PER_REQUEST])
+            resp = self._get(
+                ACTION_API,
+                params={
+                    "action": "query",
+                    "prop": "pageprops",
+                    "ppprop": "wikibase_item",
+                    "redirects": "1",
+                    "titles": "|".join(batch),
+                    "format": "json",
+                    "formatversion": "2",
+                },
+            )
+            data = resp.json().get("query", {})
+            # Map every requested title through normalisation and redirects to the
+            # title the API actually returned, so nothing is silently dropped.
+            alias: dict[str, str] = {}
+            for hop in ("normalized", "redirects"):
+                for entry in data.get(hop, []):
+                    alias[entry["from"]] = entry["to"]
+
+            resolved = {
+                page["title"]: page.get("pageprops", {}).get("wikibase_item")
+                for page in data.get("pages", [])
+            }
+            for title in batch:
+                final = title
+                for _ in range(4):  # normalise -> redirect chains are short
+                    if final in alias:
+                        final = alias[final]
+                    else:
+                        break
+                yield {
+                    "title": title,
+                    "resolved_title": final,
+                    "qid": resolved.get(final),
+                }
+
+    def wikidata_entities(self, qids: Sequence[str]) -> Iterator[dict]:
+        """Yield Wikidata claims for each QID, in batches of 50.
+
+        Returns everything spec 0002 needs from one call: whether the item is a human
+        (`P31 = Q5`), plus birth year, death year, gender and occupations.
+        """
+        for start in range(0, len(qids), TITLES_PER_REQUEST):
+            batch = list(qids[start : start + TITLES_PER_REQUEST])
+            resp = self._get(
+                WIKIDATA_API,
+                params={
+                    "action": "wbgetentities",
+                    "ids": "|".join(batch),
+                    "props": "claims",
+                    "format": "json",
+                },
+            )
+            entities = resp.json().get("entities", {})
+            for qid in batch:
+                entity = entities.get(qid)
+                if entity is None or "missing" in entity:
+                    yield {"qid": qid, "is_human": False, "missing": True}
+                    continue
+                claims = entity.get("claims", {})
+                yield {
+                    "qid": qid,
+                    "missing": False,
+                    "is_human": "Q5" in _claim_ids(claims, "P31"),
+                    "birth_year": _claim_year(claims, "P569"),
+                    "death_year": _claim_year(claims, "P570"),
+                    "gender": next(iter(_claim_ids(claims, "P21")), None),
+                    "occupations": sorted(_claim_ids(claims, "P106")),
+                }
+
     def page_html(self, title: str) -> Page:
         """Fetch Parsoid HTML and the revision id it was rendered from.
 
@@ -211,6 +307,52 @@ class WikiClient:
         if revision_id is None:
             raise WikiError(f"no revision id in ETag for {title!r}: {resp.headers.get('ETag')!r}")
         return Page(title=title, revision_id=revision_id, html=resp.content)
+
+
+def _best_rank(claims: dict, prop: str) -> list[dict]:
+    """Claims for `prop` at best rank — preferred if any exist, else normal.
+
+    Deprecated claims are never returned. Ignoring rank is not a detail: Q17021508
+    is a *helicopter* carrying a deprecated `P31 = Q5`, and reading every claim
+    regardless of rank classified it as a person. SPARQL's `wdt:` prefix applies
+    exactly this rule, so the two paths now agree.
+    """
+    candidates = [c for c in claims.get(prop, []) if c.get("rank") != "deprecated"]
+    preferred = [c for c in candidates if c.get("rank") == "preferred"]
+    return preferred or candidates
+
+
+def _claim_ids(claims: dict, prop: str) -> set[str]:
+    """Entity ids asserted by `prop` at best rank, ignoring novalue/somevalue snaks."""
+    out = set()
+    for claim in _best_rank(claims, prop):
+        value = claim.get("mainsnak", {}).get("datavalue", {}).get("value")
+        if isinstance(value, dict) and "id" in value:
+            out.add(value["id"])
+    return out
+
+
+def _claim_year(claims: dict, prop: str) -> int | None:
+    """Year from the first time-valued claim for `prop`.
+
+    Wikidata times look like ``+1885-10-07T00:00:00Z``, and BCE dates carry a leading
+    ``-``, so the sign is kept rather than stripped.
+
+    Note this returns the year **as stored**, which for older records is often the
+    Julian calendar. WDQS's ``YEAR()`` converts to Gregorian first, so the two can
+    differ by a year around a New Year boundary — Q1232515 is stored as 29 Dec 1907
+    Julian, which is 11 Jan 1908 Gregorian. SPARQL is the primary path and gives the
+    Gregorian answer.
+    """
+    for claim in _best_rank(claims, prop):
+        value = claim.get("mainsnak", {}).get("datavalue", {}).get("value")
+        if isinstance(value, dict) and "time" in value:
+            stamp = value["time"]
+            sign, digits = (-1, stamp[1:]) if stamp.startswith("-") else (1, stamp.lstrip("+"))
+            year = digits.split("-", 1)[0]
+            if year.isdigit():
+                return sign * int(year)
+    return None
 
 
 def _revision_from_etag(etag: str) -> int | None:

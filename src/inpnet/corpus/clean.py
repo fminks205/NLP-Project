@@ -96,10 +96,16 @@ def _title_from_href(href: str) -> str | None:
 
     ``./Niels_Bohr`` -> ``Niels Bohr``. Fragment-only and external links return
     None so they are not recorded as entity links.
+
+    Red links — targets with no article yet — arrive as
+    ``./Wolfgang_Riezler?action=edit&redlink=1``. The query string must be stripped
+    or the title is unusable: it will match nothing in Wikidata and shows up as a
+    mangled pseudo-title. The link still names a real person, so the title is kept
+    and the caller decides what to do with an unresolvable one.
     """
     if not href or not href.startswith("./"):
         return None
-    target = href[2:].split("#", 1)[0]
+    target = href[2:].split("#", 1)[0].split("?", 1)[0]
     if not target:
         return None
     return urllib.parse.unquote(target).replace("_", " ")

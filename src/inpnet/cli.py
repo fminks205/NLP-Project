@@ -18,11 +18,17 @@ import sys
 from pathlib import Path
 
 from .corpus import clean, estimate, fetch, seed
+from .nlp import mentions as mentions_stage
+from .nlp import resolve as resolve_stage
+from .nlp import segment as segment_stage
 
 DEFAULT_QUERY = Path("docs/queries/physicists.rq")
 DEFAULT_SEED = Path("data/raw/seed.jsonl")
 DEFAULT_RAW = Path("data/raw")
-DEFAULT_DOCS = Path("data/interim/documents.jsonl")
+DEFAULT_INTERIM = Path("data/interim")
+DEFAULT_DOCS = DEFAULT_INTERIM / "documents.jsonl"
+DEFAULT_SENTENCES = DEFAULT_INTERIM / "sentences.jsonl"
+DEFAULT_CACHE = DEFAULT_INTERIM / "wikidata_cache.jsonl"
 
 
 def _contact(args: argparse.Namespace) -> str:
@@ -71,6 +77,31 @@ def main(argv: list[str] | None = None) -> int:
         "--lenient", action="store_true", help="report offset errors instead of failing"
     )
 
+    # --- spec 0002: entity & mention layer ---------------------------
+    p_res = sub.add_parser("resolve", parents=[common], help="link targets -> Wikidata humans")
+    p_res.add_argument("--docs", type=Path, default=DEFAULT_DOCS)
+    p_res.add_argument("--out", type=Path, default=DEFAULT_INTERIM)
+    p_res.add_argument("--limit", type=int, help="only the N most frequent link targets")
+
+    p_seg = sub.add_parser("segment", parents=[common], help="split sections into sentences")
+    p_seg.add_argument("--docs", type=Path, default=DEFAULT_DOCS)
+    p_seg.add_argument("--out", type=Path, default=DEFAULT_SENTENCES)
+    p_seg.add_argument("--limit", type=int, help="only the first N documents")
+    p_seg.add_argument("--n-process", type=int, default=1)
+
+    p_men = sub.add_parser("mentions", parents=[common], help="build mentions + candidate pairs")
+    p_men.add_argument("--docs", type=Path, default=DEFAULT_DOCS)
+    p_men.add_argument("--sentences", type=Path, default=DEFAULT_SENTENCES)
+    p_men.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    p_men.add_argument("--seed", type=Path, default=DEFAULT_SEED)
+    p_men.add_argument("--out", type=Path, default=DEFAULT_INTERIM)
+    p_men.add_argument("--limit", type=int)
+    p_men.add_argument(
+        "--lenient",
+        action="store_true",
+        help="proceed on an incomplete Wikidata cache (people will be omitted)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "seed":
@@ -109,6 +140,34 @@ def main(argv: list[str] | None = None) -> int:
             args.raw,
             args.out,
             seed_path=args.seed,
+            limit=args.limit,
+            strict=not args.lenient,
+        )
+
+    elif args.command == "resolve":
+        counts = resolve_stage.run(
+            args.docs, args.out, contact=_contact(args), delay=args.delay, limit=args.limit
+        )
+        rate = counts["human_instance_rate"]
+        print(
+            f"\n{counts['distinct_targets']:,} distinct link targets, "
+            f"{counts['human_targets']:,} are people\n"
+            f"  person-link instances: {counts['human_link_instances']:,} "
+            f"of {counts['total_link_instances']:,} ({rate:.1%})\n"
+        )
+
+    elif args.command == "segment":
+        counts = segment_stage.run(
+            args.docs, args.out, limit=args.limit, n_process=args.n_process
+        )
+
+    elif args.command == "mentions":
+        counts = mentions_stage.run(
+            args.docs,
+            args.sentences,
+            args.cache,
+            args.seed,
+            args.out,
             limit=args.limit,
             strict=not args.lenient,
         )

@@ -218,6 +218,14 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Project data — see AGENTS.md §4
-data/
+# Note: `data/*` not `data/`, because git will not descend into a fully-ignored
+# directory and the negations below would never be considered.
+data/*
 !data/annotations/
 !data/annotations/**
+
+# The Wikidata snapshot is the citable artifact for spec 0002 — Wikidata is mutable,
+# so this gzipped cache is what makes the downstream pipeline reproducible offline.
+!data/interim/
+data/interim/*
+!data/interim/wikidata_cache.jsonl.gz
