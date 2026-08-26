@@ -1,9 +1,13 @@
-"""Command line interface for the corpus stages of spec 0001.
+"""Command line interface for the `inpnet` pipeline (specs 0001-0003).
 
     inpnet seed     --contact you@example.org
     inpnet estimate --contact you@example.org
     inpnet fetch    --contact you@example.org --limit 200
     inpnet clean
+    inpnet resolve  --contact you@example.org
+    inpnet segment
+    inpnet mentions
+    inpnet cluster                       # needs `uv sync --extra relations`
 
 Each stage is a separate command on purpose: a failed fetch must never force a
 re-query, and a cleaning bug must never force a re-fetch.
@@ -21,6 +25,7 @@ from .corpus import clean, estimate, fetch, seed
 from .nlp import mentions as mentions_stage
 from .nlp import resolve as resolve_stage
 from .nlp import segment as segment_stage
+from .relations import cluster as cluster_stage
 
 DEFAULT_QUERY = Path("docs/queries/physicists.rq")
 DEFAULT_SEED = Path("data/raw/seed.jsonl")
@@ -29,6 +34,7 @@ DEFAULT_INTERIM = Path("data/interim")
 DEFAULT_DOCS = DEFAULT_INTERIM / "documents.jsonl"
 DEFAULT_SENTENCES = DEFAULT_INTERIM / "sentences.jsonl"
 DEFAULT_CACHE = DEFAULT_INTERIM / "wikidata_cache.jsonl"
+DEFAULT_CANDIDATES = DEFAULT_INTERIM / "candidates.jsonl"
 
 
 def _contact(args: argparse.Namespace) -> str:
@@ -102,6 +108,23 @@ def main(argv: list[str] | None = None) -> int:
         help="proceed on an incomplete Wikidata cache (people will be omitted)",
     )
 
+    # --- spec 0003: relation clustering interface --------------------
+    p_clu = sub.add_parser(
+        "cluster", parents=[common], help="candidate sentences -> field-agnostic clusters"
+    )
+    p_clu.add_argument("--in", dest="candidates", type=Path, default=DEFAULT_CANDIDATES)
+    p_clu.add_argument("--out", type=Path, default=DEFAULT_INTERIM)
+    p_clu.add_argument("--model", default=cluster_stage.DEFAULT_MODEL)
+    p_clu.add_argument(
+        "--min-cluster-size", type=int, default=cluster_stage.DEFAULT_MIN_CLUSTER_SIZE
+    )
+    p_clu.add_argument("--n-neighbors", type=int, default=cluster_stage.DEFAULT_N_NEIGHBORS)
+    p_clu.add_argument("--n-components", type=int, default=cluster_stage.DEFAULT_N_COMPONENTS)
+    p_clu.add_argument(
+        "--random-state", type=int, default=cluster_stage.DEFAULT_RANDOM_STATE
+    )
+    p_clu.add_argument("--limit", type=int, help="only the first N unique sentences")
+
     args = parser.parse_args(argv)
 
     if args.command == "seed":
@@ -170,6 +193,26 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             limit=args.limit,
             strict=not args.lenient,
+        )
+
+    elif args.command == "cluster":
+        try:
+            counts = cluster_stage.run(
+                args.candidates,
+                args.out,
+                model_name=args.model,
+                min_cluster_size=args.min_cluster_size,
+                n_neighbors=args.n_neighbors,
+                n_components=args.n_components,
+                random_state=args.random_state,
+                limit=args.limit,
+            )
+        except ImportError as exc:
+            sys.exit(f"error: {exc}")
+        print(
+            f"\n{counts['n_sentences']:,} unique sentences -> {counts['n_clusters']:,} "
+            f"clusters, {counts['n_noise']:,} noise ({counts['noise_fraction']:.1%})\n"
+            f"  clustering_run_id: {counts['clustering_run_id']}\n"
         )
 
     print(json.dumps(counts, indent=2))

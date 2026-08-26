@@ -30,16 +30,22 @@ def write_manifest(
     out_dir: Path,
     *,
     stage: str,
+    spec: str,
     config: dict[str, Any],
     counts: dict[str, Any],
     inputs: dict[str, Path] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Path:
-    """Write `_manifest.json` into out_dir and return its path."""
+    """Write `_manifest.json` into out_dir and return its path.
+
+    `spec` names the spec this stage implements (e.g. "0002-entity-mention-layer"), so a
+    manifest is traceable to the decision that produced it. Required rather than
+    defaulted: a silently-wrong spec id defeats the point of writing it down.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
         "stage": stage,
-        "spec": "0001-corpus-acquisition",
+        "spec": spec,
         "created_at": datetime.now(UTC).isoformat(),
         "inpnet_version": __version__,
         "python": sys.version.split()[0],

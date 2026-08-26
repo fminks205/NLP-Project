@@ -10,6 +10,20 @@ dependencies = [
     "lxml>=5.2",
     "spacy>=3.8.16",
     "en-core-web-sm",
+    "pyyaml>=6.0",
+]
+
+# Spec 0003's `cluster` stage. Kept optional (`uv sync --extra relations`) rather than a
+# core dependency: it is the project's first ML dependency beyond spaCy's `senter`, pulls
+# in a CPU PyTorch build, and nobody working only on specs 0001/0002 needs the download.
+# See README.md "Dependencies" for what each package is for.
+[project.optional-dependencies]
+relations = [
+    "sentence-transformers>=3.0",
+    "torch>=2.2",
+    "umap-learn>=0.5",
+    "scikit-learn>=1.3",   # ships sklearn.cluster.HDBSCAN, spec 0003 §Decision 3
+    "numpy>=1.26",
 ]
 
 [project.scripts]
@@ -28,7 +42,19 @@ packages = ["src/inpnet"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-markers = ["network: hits live Wikimedia APIs (deselect with -m 'not network')"]
+markers = [
+    "network: hits live Wikimedia APIs (deselect with -m 'not network')",
+    "model: exercises the real sentence-transformers model, needs a one-time download (deselect with -m 'not model')",
+]
 
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+# CPU-only PyTorch build -- there is no GPU today (see AGENTS.md); this avoids pulling
+# the much larger CUDA-enabled wheel. `explicit = true` keeps this index scoped to torch,
+# not used as a fallback for arbitrary packages. Revisit once a GPU is available.
+torch = [{ index = "pytorch-cpu", extra = "relations" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

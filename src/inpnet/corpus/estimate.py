@@ -115,6 +115,7 @@ def run(
         write_manifest(
             out_dir,
             stage="estimate",
+            spec="0001-corpus-acquisition",
             config={"seed_path": str(seed_path), "sample_size": sample_size, "seed": seed},
             counts=result,
             inputs={"seed": seed_path},

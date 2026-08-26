@@ -305,6 +305,7 @@ def run(
     write_manifest(
         out_dir,
         stage="mentions",
+        spec="0002-entity-mention-layer",
         config={
             "limit": limit,
             "strict": strict,

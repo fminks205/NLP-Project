@@ -293,6 +293,7 @@ def run(
     write_manifest(
         out_dir,
         stage="resolve",
+        spec="0002-entity-mention-layer",
         config={
             "documents": str(documents_path),
             "limit": limit,

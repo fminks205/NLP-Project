@@ -1,0 +1,22 @@
+# Template for a relation-typology plug-in — spec 0003 §Decision 6.
+#
+# Copy this file (e.g. to `physics.yaml`), fill in one entry per relation type, and
+# validate it with `inpnet.relations.typology.load_typology`. `clustering_run_id` must
+# match the `clustering_run_id` in the `cluster` stage manifest you clustered against —
+# find it in `data/interim/_manifest.json` after running `inpnet cluster`.
+#
+# This file is meant to be the one thing an annotation guide, a model prompt, and the
+# evaluation script all read — generated from it, not copied by hand into three places.
+
+- type_id: example_type              # stable short id, unique within this file
+  label: "Example type"              # human-readable name
+  definition: >
+    What an annotator checks for before assigning this label. Be concrete enough that
+    two annotators reading only this sentence would make the same call.
+  direction: directed                # or: symmetric
+  cluster_ids: [0]                   # cluster_id(s) from cluster_summary.jsonl that map here
+  clustering_run_id: "REPLACE_ME"    # from the cluster stage's _manifest.json
+  wikidata_properties: []            # e.g. ["P26"] for spouse; [] if this type has no
+                                      # Wikidata equivalent (that gap is part of the story)
+  examples:
+    - "An example sentence illustrating this relation."

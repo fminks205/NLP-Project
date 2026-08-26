@@ -82,6 +82,7 @@ def run(
     write_manifest(
         out_dir,
         stage="fetch",
+        spec="0001-corpus-acquisition",
         config={
             "seed_path": str(seed_path),
             "limit": limit,

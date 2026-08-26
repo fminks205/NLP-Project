@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft |
+| **Status** | Accepted |
 | **Depends on** | 0002 |
 | **Superseded by** | — |
 | **Owner** | Falk Minks |
@@ -284,3 +284,8 @@ stage overwrites another stage's output).
 - 2026-08-26 — created. Scoped as a field-agnostic clustering interface plus a typology
   plug-in contract, so the relation typology can vary by research field without changing
   the clustering stage; the concrete physics label set is deferred to a follow-on spec.
+- 2026-08-26 — accepted. Implementation started: `cluster` stage
+  (`src/inpnet/relations/cluster.py`), the typology contract and validator
+  (`src/inpnet/relations/typology.py`, `docs/specs/typologies/TEMPLATE.yaml`), and
+  `inpnet cluster`. Not yet run against the corpus — acceptance criteria that need a
+  real run (determinism check, noise-bucket size, human review) are still open.

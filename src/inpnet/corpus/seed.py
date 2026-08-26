@@ -112,6 +112,7 @@ def run(
     write_manifest(
         out_path.parent,
         stage="seed",
+        spec="0001-corpus-acquisition",
         config={"query_path": str(query_path), "endpoint": "WDQS"},
         counts=counts,
         extra={"query": query},

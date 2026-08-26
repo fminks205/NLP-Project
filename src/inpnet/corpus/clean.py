@@ -285,6 +285,7 @@ def run(
     write_manifest(
         out_path.parent,
         stage="clean",
+        spec="0001-corpus-acquisition",
         config={"raw_dir": str(raw_dir), "limit": limit, "strict": strict},
         counts=counts,
         inputs={"seed": seed_path},

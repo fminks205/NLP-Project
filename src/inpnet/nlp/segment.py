@@ -133,6 +133,7 @@ def run(
     write_manifest(
         out_path.parent,
         stage="segment",
+        spec="0002-entity-mention-layer",
         config={"model": MODEL, "limit": limit, "n_process": n_process},
         counts=counts,
         inputs={"documents": documents_path},

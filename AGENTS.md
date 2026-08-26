@@ -55,7 +55,7 @@ Add a row here in the same commit as any new spec.
 |----|------|--------|-----------------|
 | 0001 | [Corpus acquisition](docs/specs/0001-corpus-acquisition.md) | Draft | Which Wikipedia articles, how they're selected, fetched, and cleaned |
 | 0002 | [Entity & mention layer](docs/specs/0002-entity-mention-layer.md) | Draft | Which spans are people, how they resolve to Wikidata, candidate pairs |
-| 0003 | [Relation typology](docs/specs/0003-relation-typology.md) | Draft | Field-agnostic sentence clustering, and the contract a domain-specific relation typology plugs into it through |
+| 0003 | [Relation typology](docs/specs/0003-relation-typology.md) | Accepted | Field-agnostic sentence clustering, and the contract a domain-specific relation typology plugs into it through |
 
 ## 4. Repository layout
 
@@ -70,6 +70,7 @@ NLP-Project/
 ├── pyproject.toml             # uv-managed; `uv sync` then `uv run inpnet ...`
 ├── docs/
 │   ├── specs/                 # ← all specs live here
+│   │   └── typologies/        #   relation-typology plug-in configs (spec 0003)
 │   ├── queries/               # SPARQL used by the pipeline, version-controlled
 │   └── paper/                 # (planned) source of the paper
 ├── src/inpnet/                # the package — importable, tested code
@@ -77,7 +78,8 @@ NLP-Project/
 │   ├── manifest.py            #   run manifests + JSONL helpers
 │   ├── cli.py                 #   `inpnet` entry point
 │   ├── corpus/                #   seed / estimate / fetch / clean  (spec 0001)
-│   └── nlp/                   #   resolve / segment / mentions     (spec 0002)
+│   ├── nlp/                   #   resolve / segment / mentions     (spec 0002)
+│   └── relations/             #   cluster / typology contract      (spec 0003)
 ├── notebooks/                 # (planned) exploration only — never imported by src/
 ├── tests/                     # pytest
 └── data/                      # gitignored, except data/annotations/
