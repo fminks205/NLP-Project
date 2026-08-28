@@ -8,6 +8,8 @@
     inpnet segment
     inpnet mentions
     inpnet cluster                       # needs `uv sync --extra relations`
+    inpnet cluster-sweep                 # fast hyperparameter diagnostics on a sample
+    inpnet cluster-summary               # cluster_summary.jsonl as readable text
 
 Each stage is a separate command on purpose: a failed fetch must never force a
 re-query, and a cleaning bug must never force a re-fetch.
@@ -22,10 +24,12 @@ import sys
 from pathlib import Path
 
 from .corpus import clean, estimate, fetch, seed
+from .manifest import read_jsonl
 from .nlp import mentions as mentions_stage
 from .nlp import resolve as resolve_stage
 from .nlp import segment as segment_stage
 from .relations import cluster as cluster_stage
+from .relations import diagnostics as diagnostics_stage
 
 DEFAULT_QUERY = Path("docs/queries/physicists.rq")
 DEFAULT_SEED = Path("data/raw/seed.jsonl")
@@ -123,7 +127,53 @@ def main(argv: list[str] | None = None) -> int:
     p_clu.add_argument(
         "--random-state", type=int, default=cluster_stage.DEFAULT_RANDOM_STATE
     )
+    p_clu.add_argument(
+        "--metric",
+        default=cluster_stage.DEFAULT_METRIC,
+        help="UMAP distance metric (cosine matches how sentence embeddings are trained)",
+    )
+    p_clu.add_argument(
+        "--cluster-selection-method",
+        choices=["eom", "leaf"],
+        default=cluster_stage.DEFAULT_CLUSTER_SELECTION_METHOD,
+        help="HDBSCAN cluster selection: eom favors the most persistent clusters "
+        "(can pick one giant cluster), leaf favors more/smaller ones",
+    )
     p_clu.add_argument("--limit", type=int, help="only the first N unique sentences")
+
+    p_sweep = sub.add_parser(
+        "cluster-sweep",
+        parents=[common],
+        help="fast UMAP/HDBSCAN hyperparameter diagnostics on a sample -- a dev tool, "
+        "not a pipeline stage; see docs/specs/0003-relation-typology.md",
+    )
+    p_sweep.add_argument("--in", dest="candidates", type=Path, default=DEFAULT_CANDIDATES)
+    p_sweep.add_argument("--model", default=cluster_stage.DEFAULT_MODEL)
+    p_sweep.add_argument("--limit", type=int, default=5000, help="sentences to sample")
+    p_sweep.add_argument(
+        "--random-state", type=int, default=cluster_stage.DEFAULT_RANDOM_STATE
+    )
+    p_sweep.add_argument("--out", type=Path, help="optional: write full results as JSON")
+    p_sweep.add_argument(
+        "--show-exemplars",
+        type=int,
+        default=0,
+        metavar="N",
+        help="expand the N most-balanced combos with real exemplar sentences to read",
+    )
+
+    p_csum = sub.add_parser(
+        "cluster-summary",
+        parents=[common],
+        help="render cluster_summary.jsonl as human-readable text",
+    )
+    p_csum.add_argument(
+        "--in", dest="summary", type=Path, default=DEFAULT_INTERIM / "cluster_summary.jsonl"
+    )
+    p_csum.add_argument("--out", type=Path, help="write to a file instead of stdout")
+    p_csum.add_argument(
+        "--samples", action="store_true", help="also show each cluster's random sample"
+    )
 
     args = parser.parse_args(argv)
 
@@ -205,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                 n_neighbors=args.n_neighbors,
                 n_components=args.n_components,
                 random_state=args.random_state,
+                metric=args.metric,
+                cluster_selection_method=args.cluster_selection_method,
                 limit=args.limit,
             )
         except ImportError as exc:
@@ -214,6 +266,38 @@ def main(argv: list[str] | None = None) -> int:
             f"clusters, {counts['n_noise']:,} noise ({counts['noise_fraction']:.1%})\n"
             f"  clustering_run_id: {counts['clustering_run_id']}\n"
         )
+
+    elif args.command == "cluster-sweep":
+        try:
+            results = diagnostics_stage.sweep(
+                args.candidates,
+                limit=args.limit,
+                model_name=args.model,
+                random_state=args.random_state,
+                expand_top_n=args.show_exemplars,
+            )
+        except ImportError as exc:
+            sys.exit(f"error: {exc}")
+        print(diagnostics_stage.format_table(results))
+        if args.show_exemplars:
+            print()
+            print(diagnostics_stage.format_exemplars(results))
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            print(f"\nwrote {args.out}")
+        return 0
+
+    elif args.command == "cluster-summary":
+        rows = read_jsonl(args.summary)
+        text = cluster_stage.format_cluster_summary(rows, show_samples=args.samples)
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(text, encoding="utf-8")
+            print(f"wrote {args.out} ({len(rows):,} clusters)")
+        else:
+            print(text)
+        return 0
 
     print(json.dumps(counts, indent=2))
     return 0

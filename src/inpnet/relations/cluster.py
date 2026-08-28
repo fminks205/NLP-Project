@@ -32,6 +32,8 @@ DEFAULT_MIN_CLUSTER_SIZE = 15
 DEFAULT_N_NEIGHBORS = 15
 DEFAULT_N_COMPONENTS = 5
 DEFAULT_RANDOM_STATE = 42
+DEFAULT_METRIC = "cosine"
+DEFAULT_CLUSTER_SELECTION_METHOD = "eom"
 DEFAULT_N_EXEMPLARS = 5
 DEFAULT_N_SAMPLES = 5
 
@@ -44,6 +46,25 @@ Embedder = Callable[[Sequence[str]], Any]
 def sentence_key(row: dict) -> str:
     """The `(doc_id, section_idx, sent_idx)` key a candidate pair's sentence lives at."""
     return f"{row['doc_id']}:{row['section_idx']}:{row['sent_idx']}"
+
+
+def prepare_sentences(candidates: list[dict], *, limit: int | None = None) -> list[dict]:
+    """Dedup already-loaded candidates to distinct sentences, sorted and (optionally) capped.
+
+    Shared by `run()` and the diagnostics sweep (`diagnostics.py`) so both operate on
+    the exact same sentence set for a given `limit` -- a sweep result is only a useful
+    predictor of the full run if it's built from the same loading logic. Takes an
+    already-loaded `candidates` list, not a path, so a caller that also needs the raw
+    candidate count (as `run()` does, for its manifest) reads the file once.
+    """
+    sentences = dedup_sentences(candidates)
+    # Sort by the (doc_id, section_idx, sent_idx) triple, not the concatenated
+    # sentence_id string -- string order puts "…:10" before "…:2" once an index reaches
+    # double digits, which is still deterministic but needlessly hard to read.
+    sentences.sort(key=lambda row: (row["doc_id"], row["section_idx"], row["sent_idx"]))
+    if limit is not None:
+        sentences = sentences[:limit]
+    return sentences
 
 
 def dedup_sentences(candidates: list[dict]) -> list[dict]:
@@ -91,11 +112,17 @@ def reduce_dimensions(
     n_neighbors: int = DEFAULT_N_NEIGHBORS,
     n_components: int = DEFAULT_N_COMPONENTS,
     random_state: int = DEFAULT_RANDOM_STATE,
+    metric: str = DEFAULT_METRIC,
 ) -> Any:
     """UMAP dimensionality reduction ahead of density-based clustering (spec 0003 §Decision 3).
 
     `n_neighbors`/`n_components` are clamped to the input size so this also runs on the
     small samples the test suite uses, not just the full corpus.
+
+    `metric="cosine"` (not UMAP's Euclidean default) because sentence-transformer
+    embeddings are trained and conventionally compared by cosine similarity, not
+    Euclidean distance -- a mismatch discovered the hard way on the first full-corpus
+    run, which produced one 43,634-sentence cluster instead of anything relation-like.
     """
     try:
         import umap
@@ -107,12 +134,16 @@ def reduce_dimensions(
         n_neighbors=min(n_neighbors, max(n - 1, 2)),
         n_components=min(n_components, max(n - 1, 1)),
         random_state=random_state,
+        metric=metric,
     )
     return reducer.fit_transform(embeddings)
 
 
 def cluster_embeddings(
-    reduced: Any, *, min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE
+    reduced: Any,
+    *,
+    min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
+    cluster_selection_method: str = DEFAULT_CLUSTER_SELECTION_METHOD,
 ) -> tuple[Any, Any]:
     """HDBSCAN over the reduced embeddings. Label `-1` is noise (spec 0003 §Decision 3).
 
@@ -121,6 +152,14 @@ def cluster_embeddings(
     scikit-learn instead of needing its own compiled build, which matters on a fresh
     Python 3.13 install. See the spec's Alternatives table for the reasoning; the choice
     of package wasn't pinned by the spec itself.
+
+    `cluster_selection_method="eom"` (excess of mass, HDBSCAN's default) picks the most
+    *persistent* clusters in the condensed tree, which on the first full-corpus run
+    picked the root -- one 43k-sentence cluster -- over any smaller substructure.
+    `"leaf"` selects the leaves of that tree instead: more, smaller clusters, no
+    persistence competition against one dominant blob. Exposed as a parameter rather
+    than hardcoded because which is right is an empirical question the diagnostics
+    sweep (`diagnostics.py`) exists to answer, not a settled default.
     """
     try:
         from sklearn.cluster import HDBSCAN
@@ -129,7 +168,14 @@ def cluster_embeddings(
             "scikit-learn>=1.3 is not installed. Run `uv sync --extra relations`."
         ) from exc
 
-    clusterer = HDBSCAN(min_cluster_size=min(min_cluster_size, max(len(reduced), 2)))
+    # copy=True: `reduced` is read again afterward (build_cluster_summary's centroid
+    # distances), so it must not be mutated in place. Explicit because sklearn's default
+    # is changing (False -> True in 1.10) and the old default silently risked exactly that.
+    clusterer = HDBSCAN(
+        min_cluster_size=min(min_cluster_size, max(len(reduced), 2)),
+        cluster_selection_method=cluster_selection_method,
+        copy=True,
+    )
     labels = clusterer.fit_predict(reduced)
     probabilities = getattr(clusterer, "probabilities_", None)
     if probabilities is None:  # pragma: no cover - defensive; sklearn always sets this
@@ -191,6 +237,50 @@ def build_cluster_summary(
     return summary
 
 
+def format_cluster_summary(rows: list[dict], *, show_samples: bool = False) -> str:
+    """Render `cluster_summary.jsonl` rows for a human to read during the review step
+    (spec 0003 §Decision 5) -- presentation only, `cluster_summary.jsonl` itself is
+    untouched and stays the JSONL other tooling reads.
+
+    Layout: one block per cluster, ordered by `cluster_id`. Each block's header
+    (`cluster N   size N   verdict N`) right-aligns its numbers to the widest value in
+    the whole file, so the same field lines up in the same column from block to block --
+    scan down the page and the `size` column reads as a column, not a ragged edge.
+    Sentences sit one indentation level under their cluster's header, each behind the
+    same `- ` bullet, so every sentence's text starts at the same column too, in every
+    cluster, not just within one block. `human_label` is free text with no natural
+    bound, so it prints on its own line rather than forcing every header to pad out to
+    the longest label in the file.
+    """
+    if not rows:
+        return "(no clusters)"
+
+    ordered = sorted(rows, key=lambda r: r["cluster_id"])
+    id_width = max(len(str(r["cluster_id"])) for r in ordered)
+    size_width = max(len(str(r["size"])) for r in ordered)
+    verdict_width = max(len(str(r.get("coherence_verdict") or "-")) for r in ordered)
+
+    blocks = []
+    for r in ordered:
+        cluster_id = str(r["cluster_id"]).rjust(id_width)
+        size = str(r["size"]).rjust(size_width)
+        verdict = str(r.get("coherence_verdict") or "-").ljust(verdict_width)
+        lines = [f"cluster {cluster_id}   size {size}   verdict {verdict}"]
+        if r.get("human_label"):
+            lines.append(f"    label: {r['human_label']}")
+
+        lines.append("    exemplars:")
+        for sentence in r["exemplar_sentences"]:
+            lines.append(f"    - {sentence}")
+        if show_samples and r.get("sample_sentences"):
+            lines.append("    samples:")
+            for sentence in r["sample_sentences"]:
+                lines.append(f"    - {sentence}")
+
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def _clustering_run_id(config: dict[str, Any]) -> str:
     """Deterministic short id for a run, derived from its config.
 
@@ -213,6 +303,8 @@ def run(
     n_neighbors: int = DEFAULT_N_NEIGHBORS,
     n_components: int = DEFAULT_N_COMPONENTS,
     random_state: int = DEFAULT_RANDOM_STATE,
+    metric: str = DEFAULT_METRIC,
+    cluster_selection_method: str = DEFAULT_CLUSTER_SELECTION_METHOD,
     limit: int | None = None,
     embedder: Embedder | None = None,
 ) -> dict[str, Any]:
@@ -226,13 +318,7 @@ def run(
     import numpy as np
 
     candidates = read_jsonl(candidates_path)
-    sentences = dedup_sentences(candidates)
-    # Sort by the (doc_id, section_idx, sent_idx) triple, not the concatenated
-    # sentence_id string -- string order puts "…:10" before "…:2" once an index reaches
-    # double digits, which is still deterministic but needlessly hard to read.
-    sentences.sort(key=lambda row: (row["doc_id"], row["section_idx"], row["sent_idx"]))
-    if limit is not None:
-        sentences = sentences[:limit]
+    sentences = prepare_sentences(candidates, limit=limit)
 
     config = {
         "model_name": model_name,
@@ -240,6 +326,8 @@ def run(
         "n_neighbors": n_neighbors,
         "n_components": n_components,
         "random_state": random_state,
+        "metric": metric,
+        "cluster_selection_method": cluster_selection_method,
         "limit": limit,
         "n_sentences": len(sentences),
     }
@@ -254,8 +342,13 @@ def run(
         n_neighbors=n_neighbors,
         n_components=n_components,
         random_state=random_state,
+        metric=metric,
     )
-    labels, probabilities = cluster_embeddings(reduced, min_cluster_size=min_cluster_size)
+    labels, probabilities = cluster_embeddings(
+        reduced,
+        min_cluster_size=min_cluster_size,
+        cluster_selection_method=cluster_selection_method,
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / "sentence_embeddings.npy", embeddings)

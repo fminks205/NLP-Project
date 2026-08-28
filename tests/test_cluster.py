@@ -14,7 +14,12 @@ import json
 import pytest
 
 from inpnet.manifest import read_jsonl
-from inpnet.relations.cluster import dedup_sentences, run, sentence_key
+from inpnet.relations.cluster import (
+    dedup_sentences,
+    format_cluster_summary,
+    run,
+    sentence_key,
+)
 
 np = pytest.importorskip("numpy")
 pytest.importorskip("umap")
@@ -207,3 +212,66 @@ def test_run_respects_limit(tmp_path):
         embedder=_fake_embedder(),
     )
     assert counts["n_sentences"] == 5
+
+
+# --- format_cluster_summary --------------------------------------------------
+
+
+def _summary_row(cluster_id, size, *, exemplars=None, samples=None, verdict=None, label=None):
+    return {
+        "cluster_id": cluster_id,
+        "clustering_run_id": "run1",
+        "size": size,
+        "exemplar_sentences": exemplars or [f"exemplar for {cluster_id}"],
+        "sample_sentences": samples or [],
+        "coherence_reviewed_by": [],
+        "coherence_verdict": verdict,
+        "human_label": label,
+    }
+
+
+def test_format_cluster_summary_empty():
+    assert format_cluster_summary([]) == "(no clusters)"
+
+
+def test_format_cluster_summary_orders_by_cluster_id():
+    rows = [_summary_row(370, 12), _summary_row(6, 40)]
+    text = format_cluster_summary(rows)
+    assert text.index("cluster   6") < text.index("cluster 370")
+
+
+def test_format_cluster_summary_aligns_columns_across_blocks():
+    """The `size` field starts at the same character column in every cluster's header,
+    even though cluster_id and size widths individually vary."""
+    rows = [_summary_row(6, 7), _summary_row(1168, 62)]
+    lines = format_cluster_summary(rows).splitlines()
+    headers = [line for line in lines if line.startswith("cluster")]
+    assert len(headers) == 2
+    assert headers[0].index("size") == headers[1].index("size")
+
+
+def test_format_cluster_summary_indents_sentences_one_level_with_aligned_bullets():
+    rows = [
+        _summary_row(1, 2, exemplars=["short one"]),
+        _summary_row(22, 33, exemplars=["another sentence"]),
+    ]
+    lines = format_cluster_summary(rows).splitlines()
+    bullet_lines = [line for line in lines if "- " in line and not line.startswith("cluster")]
+    assert bullet_lines  # at least one exemplar line per cluster
+    # every sentence line starts its bullet at the same column, regardless of that
+    # cluster's id/size width
+    bullet_columns = {line.index("-") for line in bullet_lines}
+    assert bullet_columns == {4}
+
+
+def test_format_cluster_summary_samples_are_opt_in():
+    rows = [_summary_row(1, 2, exemplars=["ex"], samples=["sample sentence"])]
+    without = format_cluster_summary(rows)
+    with_samples = format_cluster_summary(rows, show_samples=True)
+    assert "sample sentence" not in without
+    assert "sample sentence" in with_samples
+
+
+def test_format_cluster_summary_shows_label_when_present():
+    rows = [_summary_row(1, 2, label="mentorship-ish")]
+    assert "mentorship-ish" in format_cluster_summary(rows)

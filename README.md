@@ -37,8 +37,7 @@ seed → fetch → clean → resolve → segment → mentions → cluster
 └──────── spec 0001 ────────┘└──── spec 0002 ────┘  spec 0003
 ```
 
-`seed` through `mentions` have been run on the full corpus. `cluster` is implemented but
-not yet run against real data — its numbers below describe the schema, not a measurement.
+All seven stages have been run on the full corpus.
 
 All stages that hit a live API (`seed`, `fetch`, `resolve`) require a `--contact` address
 or `INPNET_CONTACT` env var — Wikimedia's User-Agent policy requires one — and rate-limit
@@ -148,7 +147,7 @@ downgrade to a warning for deliberate subset runs). **Measured:** 74,149 mention
 ### 7. `cluster` — candidate sentences → field-agnostic clusters
 
 ```bash
-inpnet cluster
+inpnet cluster --cluster-selection-method leaf --n-neighbors 15 --n-components 15 --min-cluster-size 5
 ```
 
 **Needs:** the `relations` extra (`uv sync --extra relations` — see
@@ -158,16 +157,27 @@ inpnet cluster
 
 Deliberately does **not** assign relation labels. The 76,205 candidate pairs collapse to
 43,664 distinct sentences (a sentence naming 3+ people yields several pairs); each is
-embedded (`sentence-transformers`), dimensionality-reduced (`UMAP`), and grouped by
-density (`HDBSCAN`, via `sklearn.cluster.HDBSCAN`) — with no cluster count fixed
-upfront, and a native "noise" label for sentences that don't fit any dense group. This is
-the field-agnostic layer a domain-specific relation typology (physics-specific labels,
-still to be written) plugs into via the contract in
+embedded (`sentence-transformers`), dimensionality-reduced (`UMAP`, cosine metric), and
+grouped by density (`HDBSCAN`, via `sklearn.cluster.HDBSCAN`) — with no cluster count
+fixed upfront, and a native "noise" label for sentences that don't fit any dense group.
+This is the field-agnostic layer a domain-specific relation typology (physics-specific
+labels, still to be written) plugs into via the contract in
 [`docs/specs/typologies/TEMPLATE.yaml`](docs/specs/typologies/TEMPLATE.yaml). See
 [spec 0003](docs/specs/0003-relation-typology.md) for the full reasoning, including why a
-fixed label set wasn't chosen directly. **Not yet run** — hyperparameters
-(`--min-cluster-size`, `--n-neighbors`, `--n-components`) are proposals to validate
-against the real corpus, not measured defaults.
+fixed label set wasn't chosen directly.
+
+**Measured:** 1,286 clusters, 27,881 noise (63.8%), median cluster size 9, run in 4m42s.
+HDBSCAN's default `cluster_selection_method="eom"` collapsed the whole corpus into one
+cluster (favors the most persistent node in the tree, which at this scale is the root);
+`"leaf"` fixed it — see spec 0003's Changelog. Hyperparameters were chosen by
+`inpnet cluster-sweep` (below), not guessed.
+
+**`inpnet cluster-sweep`** — a dev tool, not a pipeline stage (nothing it writes lands
+under `data/interim/` by default). Embeds a sample once, then cheaply tries a grid of
+UMAP/HDBSCAN settings against that one embedding, so comparing hyperparameters costs
+seconds per combo instead of minutes. `--show-exemplars N` expands the N most-balanced
+combos with real sentences to read, not just cluster-size statistics. See
+`src/inpnet/relations/diagnostics.py`.
 
 ## Dependencies
 

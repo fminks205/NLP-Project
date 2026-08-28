@@ -289,3 +289,25 @@ stage overwrites another stage's output).
   (`src/inpnet/relations/typology.py`, `docs/specs/typologies/TEMPLATE.yaml`), and
   `inpnet cluster`. Not yet run against the corpus — acceptance criteria that need a
   real run (determinism check, noise-bucket size, human review) are still open.
+- 2026-08-26 — first full-corpus run, and a correction to §Decision 2-3. Default
+  settings (`cluster_selection_method="eom"`, UMAP's Euclidean metric) collapsed the
+  corpus into one 43,634-sentence cluster. Fixing the metric to `"cosine"` alone did not
+  fix it (43,639/20 split, still degenerate). Diagnosed with a new dev tool,
+  `inpnet cluster-sweep` (`src/inpnet/relations/diagnostics.py`, outside this spec's
+  Interface — see its module docstring): embeds a sample once and sweeps UMAP/HDBSCAN
+  hyperparameters against it cheaply. The actual fix was `cluster_selection_method`:
+  HDBSCAN's default `"eom"` (excess of mass) favors the most *persistent* cluster in the
+  condensed tree, which at corpus scale is the root; `"leaf"` selects the tree's leaves
+  instead and stayed balanced from a 5,000-sentence sample up through the full corpus.
+  Full run (`--cluster-selection-method leaf --n-neighbors 15 --n-components 15
+  --min-cluster-size 5`, cosine metric, 4m42s): **1,286 clusters, 27,881 noise (63.8%)**,
+  median cluster size 9, 609 clusters ≥10 sentences. Spot-checked exemplars read as
+  genuinely relation-like — a doctoral-mentorship cluster ("his doctoral students
+  include..."), a postdoc-supervision cluster, a family-relation cluster ("grandson of,"
+  "great-nephews were," "brother of"), and named research collaborations (the DNA
+  structure discovery; black-hole physics) — alongside some clusters that read as shared
+  historical/topical narrative rather than one specific relation, which the human-review
+  step (§Decision 5) still needs to sort out. `cluster_selection_method` added as a
+  first-class, swept parameter next to `metric`; `"eom"` kept as the library default but
+  no longer this project's default. The two annotators' formal coherence review and the
+  determinism/byte-identical rerun check are still open.
