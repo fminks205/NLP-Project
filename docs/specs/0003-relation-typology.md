@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Superseded |
 | **Depends on** | 0002 |
-| **Superseded by** | — |
+| **Superseded by** | 0004, 0005 |
 | **Owner** | Falk Minks |
 | **Last updated** | 2026-08-26 |
 
@@ -85,6 +85,66 @@ project's first ML dependency beyond spaCy's `senter`. Actual throughput on this
 cluster quality on this corpus are unmeasured — both are acceptance criteria below, not
 assertions here.
 
+### 2a. Entity masking before embedding
+
+Unmasked, sentence embeddings key on **who** a sentence names as readily as on what
+relation it asserts —
+[`docs/findings/0001-relation-clustering-entity-and-template-bias.md`](../findings/0001-relation-clustering-entity-and-template-bias.md)
+Observation 3 (the first full-corpus run's Harteck and Rutherford clusters group on a
+shared participant, not a shared relation type) flagged exactly this and left "something
+to disentangle entity identity from relation content before embedding" as an open
+question. The article subject makes it worse: it is named in nearly every sentence of
+its own article, so a document's own sentences pull toward each other on that shared name
+alone. Concretely, three real sentences about Henry B. Eyring:
+
+> "Following the death of church president Howard W. Hunter, Eyring was sustained as a
+> member of the church's Quorum of the Twelve Apostles..."
+> "Eyring served as president of Ricks College from 1971 to 1977, as a counselor to
+> Presiding Bishop Robert D. Hales..."
+> "Eyring has served twice as commissioner of church education..."
+
+assert three different kinds of relation (a succession/ordination, an office held under a
+superior, an appointment), but share little besides "Eyring" and generic biographical
+phrasing — entity bias, not relation similarity.
+
+Before embedding, every detected person mention in a sentence is replaced with a single
+generic placeholder, `[PERSON]`:
+
+- **Linked mentions** (`mentions.jsonl`, `mention_type=link`) carry exact character
+  spans — **section-relative**, per spec 0002 §Decision 4, not sentence-relative, so
+  masking converts each one to a sentence-local offset using that sentence's own start
+  from `sentences.jsonl` before slicing (see Changelog: this conversion was missing in
+  the first implementation, which silently masked nothing for most sentences) — and are
+  masked directly, for *every* linked person in the sentence, not only the two in a
+  given candidate pair, since a suppressed `link_link` enumeration (spec 0002 §Decision
+  5) still leaves those names sitting in the sentence text.
+- **The article subject** (`mention_type=subject`) has no span — Wikipedia never
+  self-links — so it is matched by name instead: its full canonical name
+  (`entities.jsonl`) and, since prose refers to it by surname after first mention, the
+  surname alone, both as whole-word matches.
+
+One shared placeholder, not a per-entity or per-role token, is a deliberate choice: the
+goal is to remove identity, not to re-encode "how many distinct people" or "which one is
+the subject" as a different structural signal for the clusterer to key on instead.
+
+This makes `mentions.jsonl`, `entities.jsonl`, and `sentences.jsonl` (spec 0002 outputs)
+new inputs to the `cluster` stage, alongside `candidates.jsonl` — see §Interface. Masking only affects what
+`sentence_embeddings.npy` is built from; `relation_clusters.jsonl` and
+`cluster_summary.jsonl` are unchanged in shape, and `cluster_summary.jsonl`'s
+exemplar/sample sentences still show the **original**, unmasked text — masking is for
+what the embedder sees, not for what a human reviewer reads during §Decision 5's
+coherence check. The manifest records whether masking was applied
+(`config.mask_entities`) and how many sentences it actually changed
+(`counts.n_sentences_masked`); `--no-mask-entities` on `inpnet cluster` is kept as an
+ablation switch, off by default.
+
+**Known limitation:** subject-name matching is a whole-word string match on the
+canonical name and surname, not coreference — it does not catch pronouns ("he," "she"),
+which spec 0002 already scopes out as a coreference concern (§Non-goals). It can
+under-mask a subject referred to by a nickname or spelling the Wikipedia title doesn't
+carry, and could in principle over-mask if a surname coincided with an unrelated
+capitalized word — not observed so far, but not proven absent either.
+
 ### 3. Clustering: density-based, not a fixed K
 
 The "discover via clustering, no priors" direction rules out committing to a cluster count
@@ -163,7 +223,12 @@ One new stage.
 
 | Stage | Reads | Writes |
 |---|---|---|
-| `cluster` | `candidates.jsonl` | `sentence_embeddings.npy`, `sentence_ids.jsonl`, `relation_clusters.jsonl`, `cluster_summary.jsonl` |
+| `cluster` | `candidates.jsonl`, `mentions.jsonl`, `entities.jsonl`, `sentences.jsonl` | `sentence_embeddings.npy`, `sentence_ids.jsonl`, `relation_clusters.jsonl`, `cluster_summary.jsonl` |
+
+`mentions.jsonl`, `entities.jsonl`, and `sentences.jsonl` (spec 0002 outputs) drive
+entity masking before embedding (§Decision 2a) — `sentences.jsonl` specifically for
+converting a link mention's section-relative span to sentence-local; none of the three
+are otherwise read for clustering.
 
 **`sentence_ids.jsonl`** — row order matches `sentence_embeddings.npy`:
 
@@ -200,7 +265,13 @@ Candidate pairs join to a `cluster_id` via `(doc_id, section_idx, sent_idx)` →
 at read time; `candidates.jsonl` itself is not rewritten (spec 0002's stage boundary — no
 stage overwrites another stage's output).
 
-**CLI:** `inpnet cluster --in candidates.jsonl --out data/interim/ --model all-MiniLM-L6-v2 --min-cluster-size <n>`
+**CLI:** `inpnet cluster --in candidates.jsonl --mentions mentions.jsonl --entities entities.jsonl --sentences sentences.jsonl --out data/interim/relation_typology/{version}/ --model all-MiniLM-L6-v2 --min-cluster-size <n>`
+(`--mentions`/`--entities`/`--sentences` default to the current entity_mention_layer
+version's files; `--no-mask-entities` disables masking as an ablation switch.)
+
+`{version}` is this layer's current version in [`data_versions.json`](../../data_versions.json)
+at the repo root, bumped by hand; the CLI defaults already resolve it, so `--in`/`--out`
+only need overriding to point at a non-current run. See AGENTS.md §4.
 
 **Typology config schema:** `docs/specs/typologies/TEMPLATE.yaml`, per §Decision 6.
 
@@ -311,3 +382,97 @@ stage overwrites another stage's output).
   first-class, swept parameter next to `metric`; `"eom"` kept as the library default but
   no longer this project's default. The two annotators' formal coherence review and the
   determinism/byte-identical rerun check are still open.
+- 2026-09-28 — `cluster`'s output directory moved from the flat `data/interim/` to
+  `data/interim/relation_typology/{version}/` (starting at `0.0.1`), reading spec 0002's
+  `candidates.jsonl` from its own versioned directory. Small correction to this Accepted
+  spec's documented CLI interface, not a decision reversal — see `data_versions.json` and
+  AGENTS.md §4.
+- 2026-09-28 — added §Decision 2a, entity masking before embedding, prompted by a
+  concrete instance of the bias `docs/findings/0001-relation-clustering-entity-and-template-bias.md`
+  Observation 3 already flagged: three sentences about Henry B. Eyring asserting three
+  different relations clustered on his name alone. `mentions.jsonl`/`entities.jsonl`
+  added as `cluster` stage inputs; implemented in `src/inpnet/relations/cluster.py`
+  (`mask_sentence`, `build_entity_index`, `apply_masking`) and threaded through
+  `inpnet cluster` (new `--mentions`/`--entities`/`--no-mask-entities` flags) and
+  `inpnet cluster-sweep`. `data_versions.json`'s `relation_typology` bumped to `0.0.2` —
+  masking changes what's embedded, so it gets its own version directory rather than
+  overwriting the `0.0.1` run.
+- 2026-09-28 — `0.0.2` full-corpus run (same hyperparameters as the `0.0.1` run:
+  `cluster_selection_method=leaf`, `n_neighbors=15`, `n_components=15`,
+  `min_cluster_size=5`; `clustering_run_id 28755104d83f`). All 43,664 sentences had at
+  least one detected person mention masked. **1,224 clusters, 28,862 noise (66.1%)** —
+  close to but not identical to the unmasked run (1,286 clusters, 63.8% noise); masking
+  measurably perturbs cluster structure without being a dramatic reshuffle. Direct check
+  against this spec's own motivating example: the three Henry B. Eyring sentences quoted
+  in §Decision 2a landed in the same cluster in both runs (cluster 10 unmasked, cluster
+  57 masked) — masking did not split them apart. What did change: unmasked, that cluster
+  is exactly the 7 sentences from Eyring's own article and nothing else; masked, it
+  gains one sentence from a different article (Q61951207, "Meserve served as a law
+  clerk to Justice Benjamin Kaplan... and Justice Harry Blackmun...") — the same "served
+  as [role] to/of [institution]" career-summary template, different person. Reads as
+  masking nudging the cluster from purely entity-driven toward genuinely
+  template/relation-driven, but only partially: these three sentences may still cluster
+  because they share that institutional-office template with each other, not because
+  they share "Eyring" — masking removes the name but not the template, and this run
+  doesn't distinguish the two. Recorded as an honest partial result, not a fix claim;
+  see
+  [`docs/findings/0002-entity-masking-effect-on-relation-clustering.md`](../findings/0002-entity-masking-effect-on-relation-clustering.md).
+  Determinism (byte-identical rerun) and the two-annotator coherence review are still
+  open for this run, same as `0.0.1`.
+- 2026-09-28 — **bug found and fixed in link-mention masking; corrected `0.0.2` run.**
+  A user-reported check against real Wikipedia sentences ("Sir Humphry Davy" appearing
+  in three unrelated articles' sentences, still clustering together after masking)
+  traced to `build_entity_index` slicing a link mention's `start`/`end` directly against
+  the sentence-local text. Per spec 0002 §Decision 4, those offsets are
+  **section-relative**, not sentence-relative — e.g. one real mention span was
+  `[358, 374]` against a sentence only 124 characters long. Python slicing doesn't raise
+  on an out-of-range index, it clips, so `text[:358]` silently returned the whole
+  sentence unchanged and `text[374:]` returned empty — the placeholder was appended at
+  the very end instead of removing anything, and the name was left fully intact. This
+  affected every *linked*-person mask (everyone except the article's own subject, which
+  is matched by name/regex, not offset, and was unaffected) for any sentence that isn't
+  the first in its section — effectively most sentences in the corpus. Explains why the
+  `0.0.2` run above still showed the Eyring sentences clustering together: the "fix" it
+  measured wasn't actually removing linked names at all, only the subject.
+
+  Fixed by adding `build_sentence_starts` (reads each sentence's own section-relative
+  start from `sentences.jsonl`, spec 0002's output) and having `build_entity_index`
+  convert every link span to sentence-local before storing it; `mask_sentence` also
+  gained a defensive bounds check that drops any span still outside the text after
+  conversion rather than silently corrupting it. `sentences.jsonl` is now a fourth input
+  to the `cluster` stage (`--sentences`, defaulting like the others). New regression
+  tests in `tests/test_cluster.py` encode section-relative offsets with a nonzero
+  section-start explicitly, so a reversion to sentence-relative slicing fails loudly
+  instead of passing by coincidence, the way the original tests did.
+
+  **Corrected full-corpus run** (same hyperparameters, same `clustering_run_id
+  28755104d83f` — the run id is derived from config, not code, so an unrelated code fix
+  doesn't change it even though the output does; a real limitation of content-hashing
+  only the config, noted here rather than fixed, since nothing outside this session has
+  referenced that run id yet): **1,232 clusters, 28,542 noise (65.4%)**; 43,648 of
+  43,664 sentences (99.96%) had at least one mention actually masked (down from a
+  vacuous 100% under the bug, where every sentence counted as "masked" even when nothing
+  was removed). Direct re-check of the motivating examples: **all three Eyring sentences
+  are now noise (`cluster_id -1`) — no longer clustered together at all** — and so are
+  all three "Sir Humphry Davy" sentences from the bug report. Overwrote the buggy
+  `0.0.2` output in place (same version — a bug fix to what `0.0.2` was always supposed
+  to mean, not a new config decision); see
+  [`docs/findings/0002-entity-masking-effect-on-relation-clustering.md`](../findings/0002-entity-masking-effect-on-relation-clustering.md)'s
+  addendum for the full before/after comparison.
+- 2026-09-28 — **superseded.** A user review of the corrected `0.0.2` run surfaced the
+  same bias one level up: with person names masked, clusters still cohered on shared
+  *non-person* context — a shared place ("Harwell"), shared topic ("crystal growth"),
+  or both — rather than on relation type (e.g. the BCF-theory / crystal-growth cluster
+  and the AERE-Harwell cluster quoted during discussion). Masking more entity types
+  would have been a direct extension of §2a, but the discussion that followed settled on
+  a bigger change instead: don't discover relation structure via one whole-sentence
+  embedding at all — pull out each sentence's individual factors (time, place,
+  institution, the actual relation-bearing action) as separately detected, typed spans,
+  and represent a relation as an open, extensible bag of those attributes rather than a
+  single `cluster_id`. That doesn't fit this spec's interface (one `cluster_id` per
+  sentence) or its explicitly field-agnostic-clustering framing, so it's a reversal, not
+  an amendment — replaced by spec 0004 (attribute span detection) and spec 0005
+  (the schemaless relation record), per `docs/specs/README.md`'s "reversing a decision"
+  rule. This spec's code and findings are not deleted; `src/inpnet/relations/cluster.py`
+  and its masking logic (§2a) remain available as a baseline/ablation, and spec 0004
+  reuses its sentence-local span-conversion logic directly.

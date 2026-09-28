@@ -28,7 +28,10 @@ from .cluster import (
     DEFAULT_RANDOM_STATE,
     Embedder,
     _default_embedder,
+    apply_masking,
     build_cluster_summary,
+    build_entity_index,
+    build_sentence_starts,
     cluster_embeddings,
     prepare_sentences,
     reduce_dimensions,
@@ -76,6 +79,9 @@ def sweep(
     limit: int = 5000,
     model_name: str = DEFAULT_MODEL,
     random_state: int = DEFAULT_RANDOM_STATE,
+    mentions_path: Path | None = None,
+    entities_path: Path | None = None,
+    sentences_path: Path | None = None,
     reduction_grid: list[dict[str, Any]] | None = None,
     cluster_grid: list[dict[str, Any]] | None = None,
     embedder: Embedder | None = None,
@@ -88,7 +94,9 @@ def sweep(
     `limit` samples from the same `prepare_sentences` a full `run()` would use (same
     sort order, so `--limit 5000` here is the *first* 5,000 sentences a real run with
     `--limit 5000` would see too) -- a sweep result is only informative if it's reading
-    the same data a real run would.
+    the same data a real run would. `mentions_path`/`entities_path`/`sentences_path`
+    apply the same entity masking `run()` does (spec 0003 §Decision 2a) for the same
+    reason -- pass all three, or leave them None to sweep on unmasked text.
 
     By default this only ever computes size statistics -- no sentence text -- so a
     result gives you a number to rank combos by but nothing to actually read. Pass
@@ -105,8 +113,16 @@ def sweep(
     candidates = read_jsonl(candidates_path)
     sentences = prepare_sentences(candidates, limit=limit)
 
+    entity_index = None
+    if mentions_path is not None and entities_path is not None and sentences_path is not None:
+        sentence_starts = build_sentence_starts(read_jsonl(sentences_path))
+        entity_index = build_entity_index(
+            read_jsonl(mentions_path), read_jsonl(entities_path), sentence_starts
+        )
+    sentences = apply_masking(sentences, entity_index)
+
     embed = embedder or _default_embedder(model_name)
-    embeddings = np.asarray(embed([row["sentence"] for row in sentences]))
+    embeddings = np.asarray(embed([row["masked_sentence"] for row in sentences]))
 
     reduction_grid = reduction_grid if reduction_grid is not None else DEFAULT_REDUCTION_GRID
     cluster_grid = cluster_grid if cluster_grid is not None else DEFAULT_CLUSTER_GRID

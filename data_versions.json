@@ -1,0 +1,7 @@
+{
+  "corpus_acquisition": "0.0.1",
+  "entity_mention_layer": "0.0.1",
+  "relation_typology": "0.0.2",
+  "attribute_spans": "0.0.2",
+  "relations": "0.0.2"
+}

@@ -226,6 +226,12 @@ data/*
 
 # The Wikidata snapshot is the citable artifact for spec 0002 — Wikidata is mutable,
 # so this gzipped cache is what makes the downstream pipeline reproducible offline.
+# data/interim/ is versioned per layer (data_versions.json); the wildcard version
+# segment means this doesn't need editing on a version bump.
 !data/interim/
 data/interim/*
-!data/interim/wikidata_cache.jsonl.gz
+!data/interim/entity_mention_layer/
+data/interim/entity_mention_layer/*
+!data/interim/entity_mention_layer/*/
+data/interim/entity_mention_layer/*/*
+!data/interim/entity_mention_layer/*/wikidata_cache.jsonl.gz

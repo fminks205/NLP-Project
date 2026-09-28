@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from ..manifest import read_jsonl, write_jsonl, write_manifest
 from ..wiki import PERMALINK
@@ -158,6 +158,14 @@ def _heading_of(section: Tag) -> str:
 def parse_html(html: bytes | str) -> list[dict[str, Any]]:
     """Parse Parsoid HTML into cleaned sections with link spans."""
     soup = BeautifulSoup(html, "lxml")
+
+    # HTML comments (editors' "deleted image removed" notes, blocks of disabled
+    # wikitext left as a note-to-self) are `Comment`, a `NavigableString` subclass —
+    # left in place, `_walk`'s `isinstance(child, NavigableString)` check can't tell
+    # them from real text and appends the raw, un-rendered wikitext straight into
+    # the prose.
+    for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+        comment.extract()
 
     for selector in DROP_SELECTORS:
         for element in soup.select(selector):

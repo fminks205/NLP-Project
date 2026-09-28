@@ -18,6 +18,17 @@ from ..manifest import write_manifest
 
 MODEL = "en_core_web_sm"
 
+#: `senter` over-fires a sentence boundary right at an open "[" — a quoted excerpt
+#: with an editorial insertion ("the mass ... being defined [as exactly 16]"), or a
+#: bracketed abbreviation inside a name ("Mervyn [M.] Dymally") — splitting the
+#: sentence mid-word and losing everything after the bracket to the next "sentence".
+#: Consecutive senter splits are merged back together while a "[" is left unclosed,
+#: capped so a genuinely unclosed bracket in the source article (a typo that was
+#: never fixed) cannot swallow the rest of the paragraph. Chosen from the corpus:
+#: real bracket splits resolve within 4 merges (99.4% of affected groups); beyond
+#: that the "[" turns out to never close in that paragraph at all.
+MAX_BRACKET_MERGE = 4
+
 
 def load_senter(model: str = MODEL):
     """Load a sentence-splitting-only spaCy pipeline.
@@ -68,6 +79,26 @@ def _units(documents_path: Path, limit: int | None) -> Iterator[tuple[str, dict]
                     offset += len(paragraph) + 2  # the "\n\n" that was split away
 
 
+def _merge_bracket_splits(sents: list) -> Iterator[list]:
+    """Group consecutive spaCy sentences so none ends on an unclosed "[".
+
+    See ``MAX_BRACKET_MERGE``. A group of one is the common case and behaves
+    exactly as an unmerged sentence would.
+    """
+    i = 0
+    n = len(sents)
+    while i < n:
+        j = i
+        balance = sents[i].text.count("[") - sents[i].text.count("]")
+        merges = 0
+        while balance > 0 and j + 1 < n and merges < MAX_BRACKET_MERGE:
+            j += 1
+            balance += sents[j].text.count("[") - sents[j].text.count("]")
+            merges += 1
+        yield sents[i : j + 1]
+        i = j + 1
+
+
 def run(
     documents_path: Path,
     out_path: Path,
@@ -81,7 +112,13 @@ def run(
     nlp.max_length = 2_000_000  # von Neumann's article is ~92k chars; headroom is cheap
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    counts = {"paragraphs": 0, "sentences": 0, "documents": 0, "sections": 0}
+    counts = {
+        "paragraphs": 0,
+        "sentences": 0,
+        "documents": 0,
+        "sections": 0,
+        "bracket_merges": 0,
+    }
     seen_docs: set[str] = set()
     seen_sections: set[tuple[str, int]] = set()
     # sent_idx must run across the whole section, not restart per paragraph.
@@ -99,16 +136,20 @@ def run(
             seen_docs.add(ctx["doc_id"])
             key = (ctx["doc_id"], ctx["section_idx"])
             seen_sections.add(key)
-            for sent in doc.sents:
-                text = sent.text.strip()
+            for group in _merge_bracket_splits(list(doc.sents)):
+                if len(group) > 1:
+                    counts["bracket_merges"] += 1
+                first, last = group[0], group[-1]
+                raw = doc.text[first.start_char : last.end_char]
+                text = raw.strip()
                 if not text:
                     continue
                 # Re-derive exact offsets: .strip() above must not desync start/end,
                 # and offsets are relative to the *section*, so add the paragraph base.
                 start = (
                     ctx["para_offset"]
-                    + sent.start_char
-                    + (len(sent.text) - len(sent.text.lstrip()))
+                    + first.start_char
+                    + (len(raw) - len(raw.lstrip()))
                 )
                 sent_idx = section_counter.get(key, 0)
                 section_counter[key] = sent_idx + 1

@@ -72,6 +72,62 @@ def test_counts_report_paragraphs_and_sections(documents, tmp_path):
     assert counts["paragraphs"] == 2
 
 
+def test_bracket_split_is_merged_back_together(tmp_path):
+    """Regression: senter treats an open "[" as sentence-final more often than
+    warranted — a bracketed middle initial inside a name ("Mervyn [M.] Dymally")
+    used to split there, losing everything after the "[" to the next "sentence"
+    (candidate Q3760460:3:4:Q3760460:Q1922193 in the entity-mention layer, spec
+    0002). The two senter fragments must come back as one sentence.
+    """
+    text = (
+        "Carruthers was involved in initiatives such as Project SMART (formed by "
+        "Congressman Mervyn [M.] Dymally), the National Society of Black Physicists."
+    )
+    path = tmp_path / "documents.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "doc_id": "Q3760460",
+                "qid": "Q3760460",
+                "title": "T",
+                "sections": [{"heading": "", "text": text, "links": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    run(path, tmp_path / "sentences.jsonl")
+    rows = read_jsonl(tmp_path / "sentences.jsonl")
+    assert len(rows) == 1
+    assert rows[0]["text"] == text
+    assert not rows[0]["text"].rstrip().endswith("[")
+
+
+def test_bracket_merge_is_capped(tmp_path):
+    """Regression: a genuinely unclosed "[" in the source article (a typo that was
+    never fixed — found in a real article) must not swallow the rest of the
+    paragraph. The merge gives up after ``MAX_BRACKET_MERGE`` and each remaining
+    sentence is still emitted, even though the bracket count stays unbalanced.
+    """
+    text = " ".join(f"Sentence number {i} here." for i in range(1, 15))
+    text = "Born on [September 15, 1931 and grew up nearby. " + text
+    path = tmp_path / "documents.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "doc_id": "Q1",
+                "qid": "Q1",
+                "title": "T",
+                "sections": [{"heading": "", "text": text, "links": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    run(path, tmp_path / "sentences.jsonl")
+    rows = read_jsonl(tmp_path / "sentences.jsonl")
+    # merging stopped well short of consuming every remaining sentence
+    assert len(rows) >= 8
+
+
 def test_segmentation_composes_with_the_cleaner(tmp_path):
     """End-to-end on real Parsoid shapes: clean -> segment keeps offsets valid.
 

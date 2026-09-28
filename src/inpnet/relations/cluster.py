@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,12 @@ DEFAULT_METRIC = "cosine"
 DEFAULT_CLUSTER_SELECTION_METHOD = "eom"
 DEFAULT_N_EXEMPLARS = 5
 DEFAULT_N_SAMPLES = 5
+
+#: Single generic placeholder every detected person mention is replaced with before
+#: embedding (spec 0003 §Decision 2a) -- not a per-entity or per-role token, since the
+#: goal is to remove identity, not give the clusterer a different structural signal
+#: ("how many distinct people", "which one is the subject") to key on instead.
+PERSON_PLACEHOLDER = "[PERSON]"
 
 # (texts) -> array-like of shape (len(texts), dim). The real implementation wraps
 # sentence-transformers; tests inject a small deterministic stand-in instead, per the
@@ -87,6 +95,123 @@ def dedup_sentences(candidates: list[dict]) -> list[dict]:
                 "sentence": row["sentence"],
             }
     return list(seen.values())
+
+
+def _name_variants(name: str) -> list[str]:
+    """Full name plus its surname alone, longest first.
+
+    Wikipedia prose names the article subject in full on first mention and by surname
+    alone after that ("Henry B. Eyring" ... "Eyring served as..."), but the subject has
+    no span to mask directly (spec 0002 §Decision 3 -- Wikipedia never self-links).
+    Longest-first so the full name is masked before the surname pattern would otherwise
+    try (and fail) to match text already replaced.
+    """
+    bare = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    if not bare:
+        return []
+    tokens = bare.split()
+    variants = [bare]
+    if len(tokens) > 1 and tokens[-1] not in variants:
+        variants.append(tokens[-1])
+    return variants
+
+
+def build_sentence_starts(sentences: list[dict]) -> dict[str, int]:
+    """`sentence_id -> that sentence's own start offset within its section`.
+
+    From spec 0002's `sentences.jsonl`. Needed because a mention's `start`/`end` (in
+    `mentions.jsonl` and `candidates.jsonl`'s `head_span`/`tail_span`) are section-relative
+    offsets, not sentence-relative ones (spec 0002 §Decision 4: "offsets remain relative
+    to section text") -- `build_entity_index` subtracts this to get the sentence-local
+    offsets `mask_sentence` can actually slice with.
+    """
+    return {
+        f"{row['doc_id']}:{row['section_idx']}:{row['sent_idx']}": row["start"]
+        for row in sentences
+    }
+
+
+def build_entity_index(
+    mentions: list[dict], entities: list[dict], sentence_starts: dict[str, int]
+) -> dict[str, Any]:
+    """Index mentions/entities for masking (spec 0003 §Decision 2a).
+
+    `link_spans`: `sentence_id -> [(start, end), ...]`, **sentence-local**, for every
+    linked person mention in that sentence -- not only the two in a given candidate
+    pair, since a suppressed `link_link` enumeration (spec 0002 §Decision 5) still
+    leaves those names sitting in the sentence text. A mention's own `start`/`end` are
+    section-relative (spec 0002 §Decision 4); `sentence_starts` (`build_sentence_starts`)
+    converts them to sentence-local before they're stored here, so `mask_sentence` never
+    has to know the difference. A mention whose sentence isn't in `sentence_starts` is
+    skipped rather than stored with a wrong (unconverted) offset.
+
+    `subject_names`: `doc_id -> name variants` for that document's own subject, which has
+    no span at all and so is matched by name instead (`_name_variants`).
+    """
+    canonical_name = {e["qid"]: e["canonical_name"] for e in entities}
+    link_spans: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    subject_names: dict[str, list[str]] = {}
+    for m in mentions:
+        if m["mention_type"] == "link":
+            key = f"{m['doc_id']}:{m['section_idx']}:{m['sent_idx']}"
+            base = sentence_starts.get(key)
+            if base is None:
+                continue
+            link_spans[key].append((m["start"] - base, m["end"] - base))
+        elif m["mention_type"] == "subject":
+            name = canonical_name.get(m["entity_id"], m["surface"])
+            subject_names[m["doc_id"]] = _name_variants(name)
+    return {"link_spans": dict(link_spans), "subject_names": subject_names}
+
+
+def mask_sentence(text: str, spans: Sequence[tuple[int, int]], names: Sequence[str]) -> str:
+    """Replace every known person mention in `text` with a single generic placeholder.
+
+    Spec 0003 §Decision 2a: sentences about the same person otherwise cluster on shared
+    surface identity ("Eyring ... Eyring ... Eyring") rather than on the relation each
+    one actually asserts -- see
+    docs/findings/0001-relation-clustering-entity-and-template-bias.md, Observation 3.
+    Span-based masking (sentence-local offsets -- see `build_entity_index`) runs first,
+    rightmost-first so earlier offsets stay valid; name-based masking (the article
+    subject, whole-word, longest variant first) runs second over the result.
+
+    `spans` outside `text`'s own bounds are dropped rather than applied: Python slicing
+    doesn't raise on an out-of-range index, it silently clips, which is exactly how a
+    section-relative offset fed in by mistake once slipped through undetected (it
+    appended the placeholder at the very end instead of removing anything) -- see spec
+    0003 Changelog. A dropped span is a bug elsewhere (a wrong offset was passed in), not
+    something to paper over here, but corrupting unrelated text is worse than a
+    conservative no-op.
+    """
+    masked = text
+    valid_spans = {(s, e) for s, e in spans if 0 <= s < e <= len(masked)}
+    for start, end in sorted(valid_spans, key=lambda s: s[0], reverse=True):
+        masked = masked[:start] + PERSON_PLACEHOLDER + masked[end:]
+    for name in sorted(set(names), key=len, reverse=True):
+        masked = re.sub(r"\b" + re.escape(name) + r"\b", PERSON_PLACEHOLDER, masked)
+    return masked
+
+
+def apply_masking(sentences: list[dict], entity_index: dict[str, Any] | None) -> list[dict]:
+    """Attach `masked_sentence` (entity-masked text for embedding input) to each row.
+
+    `sentence` (the original text) is left untouched -- it's still what
+    `cluster_summary.jsonl`'s exemplars/samples show a human reviewer during §Decision 5.
+    When `entity_index` is None (no mentions/entities supplied), masking is a no-op and
+    `masked_sentence` mirrors `sentence` -- lets callers without that data (most of the
+    existing test suite, which exercises dedup/clustering mechanics rather than masking)
+    skip it rather than fail.
+    """
+    if entity_index is None:
+        return [dict(row, masked_sentence=row["sentence"]) for row in sentences]
+    link_spans = entity_index["link_spans"]
+    subject_names = entity_index["subject_names"]
+    out = []
+    for row in sentences:
+        spans = link_spans.get(row["sentence_id"], [])
+        names = subject_names.get(row["doc_id"], [])
+        out.append(dict(row, masked_sentence=mask_sentence(row["sentence"], spans, names)))
+    return out
 
 
 def _default_embedder(model_name: str) -> Embedder:
@@ -298,6 +423,9 @@ def run(
     candidates_path: Path,
     out_dir: Path,
     *,
+    mentions_path: Path | None = None,
+    entities_path: Path | None = None,
+    sentences_path: Path | None = None,
     model_name: str = DEFAULT_MODEL,
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
     n_neighbors: int = DEFAULT_N_NEIGHBORS,
@@ -310,6 +438,13 @@ def run(
 ) -> dict[str, Any]:
     """Run the `cluster` stage end to end. Implements spec 0003 §Interface.
 
+    `mentions_path`/`entities_path`/`sentences_path` (spec 0002 outputs) drive entity
+    masking before embedding (spec 0003 §Decision 2a) -- pass all three to mask, or
+    leave them None to skip it (the CLI always passes all three; tests that don't care
+    about masking may omit them). `sentences_path` is what lets a link mention's
+    section-relative span (spec 0002 §Decision 4) convert to the sentence-local offset
+    masking actually needs -- see `build_sentence_starts`.
+
     `embedder`, when given, replaces the real sentence-transformers model -- used by
     tests to exercise the full dedup -> embed -> reduce -> cluster -> summarize pipeline
     without a model download. Everything downstream of embedding (UMAP, HDBSCAN) still
@@ -319,6 +454,14 @@ def run(
 
     candidates = read_jsonl(candidates_path)
     sentences = prepare_sentences(candidates, limit=limit)
+
+    entity_index = None
+    if mentions_path is not None and entities_path is not None and sentences_path is not None:
+        sentence_starts = build_sentence_starts(read_jsonl(sentences_path))
+        entity_index = build_entity_index(
+            read_jsonl(mentions_path), read_jsonl(entities_path), sentence_starts
+        )
+    sentences = apply_masking(sentences, entity_index)
 
     config = {
         "model_name": model_name,
@@ -330,11 +473,13 @@ def run(
         "cluster_selection_method": cluster_selection_method,
         "limit": limit,
         "n_sentences": len(sentences),
+        "mask_entities": entity_index is not None,
+        "person_placeholder": PERSON_PLACEHOLDER,
     }
     clustering_run_id = _clustering_run_id(config)
 
     embed = embedder or _default_embedder(model_name)
-    texts = [row["sentence"] for row in sentences]
+    texts = [row["masked_sentence"] for row in sentences]
     embeddings = np.asarray(embed(texts))
 
     reduced = reduce_dimensions(
@@ -377,21 +522,30 @@ def run(
     write_jsonl(out_dir / "cluster_summary.jsonl", summary)
 
     n_noise = int(sum(1 for label in labels if int(label) == -1))
+    n_masked = sum(1 for row in sentences if row["masked_sentence"] != row["sentence"])
     counts = {
         "n_candidates": len(candidates),
         "n_sentences": len(sentences),
+        "n_sentences_masked": n_masked,
         "n_clusters": len(summary),
         "n_noise": n_noise,
         "noise_fraction": round(n_noise / len(sentences), 4) if sentences else 0.0,
         "clustering_run_id": clustering_run_id,
     }
+    inputs = {"candidates": candidates_path}
+    if mentions_path is not None:
+        inputs["mentions"] = mentions_path
+    if entities_path is not None:
+        inputs["entities"] = entities_path
+    if sentences_path is not None:
+        inputs["sentences"] = sentences_path
     write_manifest(
         out_dir,
         stage="cluster",
         spec=SPEC,
         config=config,
         counts=counts,
-        inputs={"candidates": candidates_path},
+        inputs=inputs,
         extra={"clustering_run_id": clustering_run_id},
     )
     return counts

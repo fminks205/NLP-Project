@@ -187,7 +187,11 @@ must never force a re-fetch — that separation is the whole reason these are no
 |---|---|---|
 | `seed` | `docs/queries/physicists.rq` | `data/raw/seed.jsonl` |
 | `fetch` | `data/raw/seed.jsonl` | `data/raw/html/{qid}.html`, `data/raw/fetch_log.jsonl` |
-| `clean` | `data/raw/html/` | `data/interim/documents.jsonl` |
+| `clean` | `data/raw/html/` | `data/interim/corpus_acquisition/{version}/documents.jsonl` |
+
+`{version}` is this layer's current version, recorded in
+[`data_versions.json`](../../data_versions.json) at the repo root and bumped by hand —
+see AGENTS.md §4.
 
 **`seed.jsonl`** — one object per person:
 
@@ -346,6 +350,24 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
 
 ## Changelog
 
+- 2026-09-28 — **fixed: HTML comments were leaking into cleaned prose.** A spec 0004
+  diagnostic found sentences truncated mid-word at a literal `[`
+  (`Q3760460:3:4:Q3760460:Q1922193`: "...formed by Congressman Mervyn ["). Root cause:
+  `bs4.Comment` is a `NavigableString` subclass, so `_walk`'s
+  `isinstance(child, NavigableString)` check could not tell an HTML comment from real
+  text — editors' `<!-- Deleted image removed: [[File:...]] -->` notes and large
+  commented-out draft sections (raw, unrendered wikitext, sometimes spanning what look
+  like several paragraphs) were appended straight into the extracted prose. Confirmed
+  against the raw HTML of `Q283201` and `Q504303`. Scanned the full raw corpus: **1,461
+  of 15,158 articles (9.6%) carry HTML comment nodes, ~317K characters total** that were
+  leaking in. Fixed by extracting all `Comment` nodes before walking. Re-ran `clean` on
+  the full corpus: **15,158 documents, 47,566 sections, 443,527 links, 0 offset
+  errors** — identical to the pre-fix counts (§Decision 4's measured numbers still
+  hold), confirming no real content or link was lost, only comment garbage. This was
+  necessary but not sufficient for the truncation symptom — see spec 0002's Changelog
+  for the companion segmentation bug and the combined before/after candidate counts.
+  Regression tests: `test_html_comments_are_not_included_as_prose`,
+  `test_comment_spanning_multiple_paragraphs_is_removed` in `tests/test_clean.py`.
 - 2026-08-12 — created.
 - 2026-08-12 — corpus size measured against WDQS: 11,971 strict / 15,158 with subclass
   traversal. Verified the HTML endpoint's `ETag` carries the revision id, so fetching is
@@ -364,3 +386,8 @@ file hashes, the config used, tool and model versions, timestamp, and output cou
   1.2 GB projection was accurate). Clean: 15,158 documents, 47,566 sections,
   443,527 wiki links, 0 offset errors under strict mode, 100 MB of `documents.jsonl` —
   53.1 M characters, ~10.6 M words of prose.
+- 2026-09-28 — `clean`'s output moved from the flat `data/interim/documents.jsonl` to a
+  per-layer, hand-versioned `data/interim/corpus_acquisition/{version}/documents.jsonl`
+  (starting at `0.0.1`), so a rerun doesn't silently overwrite an existing snapshot and so
+  this stage's `_manifest.json` stops colliding with 0002's and 0003's, which used to share
+  the same flat directory. See `data_versions.json` and AGENTS.md §4.

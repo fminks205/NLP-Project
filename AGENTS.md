@@ -55,7 +55,10 @@ Add a row here in the same commit as any new spec.
 |----|------|--------|-----------------|
 | 0001 | [Corpus acquisition](docs/specs/0001-corpus-acquisition.md) | Draft | Which Wikipedia articles, how they're selected, fetched, and cleaned |
 | 0002 | [Entity & mention layer](docs/specs/0002-entity-mention-layer.md) | Draft | Which spans are people, how they resolve to Wikidata, candidate pairs |
-| 0003 | [Relation typology](docs/specs/0003-relation-typology.md) | Accepted | Field-agnostic sentence clustering, and the contract a domain-specific relation typology plugs into it through |
+| 0003 | [Relation typology](docs/specs/0003-relation-typology.md) | Superseded (0004, 0005) | Field-agnostic sentence clustering, and the contract a domain-specific relation typology plugs into it through |
+| 0004 | [Relation attribute span detection](docs/specs/0004-relation-attribute-detection.md) | Accepted | Detecting `time`/`place`/`institution`/`action` spans per candidate sentence via spaCy NER + dependency parse |
+| 0005 | [Schemaless relation attributes](docs/specs/0005-schemaless-relation-attributes.md) | Accepted | Assembling participants + detected attributes into an open, extensible relation record; low-coverage records split out for review |
+| 0006 | [Graph visualization](docs/specs/0006-graph-visualization.md) | Draft | Rendering a Graphviz subgraph filtered by institution substring, edges annotated from the relation record's attribute bag |
 
 ## 4. Repository layout
 
@@ -68,23 +71,32 @@ NLP-Project/
 ├── CLAUDE.md                  # pointer to this file
 ├── README.md                  # human-facing intro
 ├── pyproject.toml             # uv-managed; `uv sync` then `uv run inpnet ...`
+├── data_versions.json          # current version per data/interim/ layer — bump by hand
 ├── docs/
 │   ├── specs/                 # ← all specs live here
 │   │   └── typologies/        #   relation-typology plug-in configs (spec 0003)
-│   ├── queries/               # SPARQL used by the pipeline, version-controlled
-│   └── paper/                 # (planned) source of the paper
+│   ├── queries/                # SPARQL used by the pipeline, version-controlled
+│   ├── methodology.md          # digest for the paper's Methods section — keep current, see §5
+│   ├── findings/                # dated notes from real runs, feeds the paper's Results/Discussion
+│   └── paper/                  # (planned) source of the paper
 ├── src/inpnet/                # the package — importable, tested code
 │   ├── wiki.py                #   Wikimedia API client (spec 0001)
 │   ├── manifest.py            #   run manifests + JSONL helpers
 │   ├── cli.py                 #   `inpnet` entry point
 │   ├── corpus/                #   seed / estimate / fetch / clean  (spec 0001)
 │   ├── nlp/                   #   resolve / segment / mentions     (spec 0002)
-│   └── relations/             #   cluster / typology contract      (spec 0003)
+│   └── relations/             #   attributes / assemble (0004, 0005); cluster / typology
+│                               #   (spec 0003, superseded — kept for reruns/ablation)
 ├── notebooks/                 # (planned) exploration only — never imported by src/
 ├── tests/                     # pytest
 └── data/                      # gitignored, except data/annotations/
     ├── raw/                   #   immutable downloads
-    ├── interim/               #   intermediate artifacts
+    ├── interim/               #   intermediate artifacts, versioned per layer — see below
+    │   ├── corpus_acquisition/{version}/      #   spec 0001 output
+    │   ├── entity_mention_layer/{version}/    #   spec 0002 output
+    │   ├── relation_typology/{version}/       #   spec 0003 output (superseded, kept)
+    │   ├── attribute_spans/{version}/         #   spec 0004 output
+    │   └── relations/{version}/               #   spec 0005 output
     ├── processed/             #   final outputs for the paper
     └── annotations/           #   hand-labelled data — TRACKED in git
 ```
@@ -96,6 +108,15 @@ NLP-Project/
   own input.
 - Everything under `data/` is gitignored **except** `data/annotations/` — hand-made
   labels are expensive and belong in version control.
+- **`data/interim/` is versioned per layer**, one directory per pipeline layer
+  (`corpus_acquisition`, `entity_mention_layer`, `relation_typology`), each holding
+  `{version}/` subdirectories so a rerun with different config never silently overwrites
+  an existing snapshot — and per-stage `_manifest.json` files stop colliding when several
+  stages used to share one flat directory. [`data_versions.json`](data_versions.json) at
+  the repo root records each layer's *current* version and is **incremented by hand** —
+  there is no automatic bump. `src/inpnet/versions.py` reads it; a stage resolves its own
+  output directory from its layer's current version, and resolves its input from the
+  version of whichever layer produced it.
 
 ## 5. Conventions
 
@@ -112,6 +133,15 @@ NLP-Project/
 - **Docstrings** on public functions name the spec they implement.
 - **Notebooks** are for exploration and figures. Logic that matters moves into `src/`.
 - **Commits** reference the spec they implement, e.g. `spec 0003: ...`.
+- **Methodology digest**: [`docs/methodology.md`](docs/methodology.md) is the standing,
+  human-facing digest of pipeline steps, technology, and actual configuration — written
+  so a human can draft the paper's Methods section from it without re-reading every spec
+  and source file. It is derived from the specs and the code, not a second place decisions
+  get made; if it and a spec disagree, the spec wins and the digest is stale. **Update it
+  in the same commit as any change that would change what it says** — a new/changed
+  pipeline stage, a changed CLI default or hyperparameter, a spec moving `Draft →
+  Accepted` or `Accepted → Implemented`, or a new full-corpus run with different measured
+  numbers. Same discipline as keeping a spec's `Status:` current (§2).
 
 **Network etiquette is a hard requirement, not a nicety.** Wikimedia's User-Agent policy
 requires an identifiable contact; `WikiClient` refuses to construct without one. Pass

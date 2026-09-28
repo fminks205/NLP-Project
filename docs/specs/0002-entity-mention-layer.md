@@ -163,7 +163,9 @@ and finish timestamps plus both chunk sizes.
 
 `wikidata_cache.jsonl.gz` (3.7 MB) is written beside the plain file and **tracked in
 git**. It is the citable snapshot, and it lets anyone re-run `segment` and `mentions`
-with no network access at all.
+with no network access at all. (Lives at
+`data/interim/entity_mention_layer/{version}/wikidata_cache.jsonl.gz`; `.gitignore`
+un-ignores that filename under any version directory.)
 
 ## Interface
 
@@ -171,9 +173,14 @@ Three stages, separate commands, each writing `_manifest.json` — same pattern 
 
 | Stage | Reads | Writes |
 |---|---|---|
-| `resolve` | `documents.jsonl` | `wikidata_cache.jsonl` |
-| `segment` | `documents.jsonl` | `sentences.jsonl` |
+| `resolve` | `documents.jsonl` (spec 0001's layer) | `wikidata_cache.jsonl` |
+| `segment` | `documents.jsonl` (spec 0001's layer) | `sentences.jsonl` |
 | `mentions` | above + `seed.jsonl` | `mentions.jsonl`, `entities.jsonl`, `candidates.jsonl` |
+
+All three stages write under this layer's own version directory,
+`data/interim/entity_mention_layer/{version}/`, and read `documents.jsonl` from
+`data/interim/corpus_acquisition/{version}/` — each `{version}` taken from its layer's
+entry in [`data_versions.json`](../../data_versions.json), bumped by hand. See AGENTS.md §4.
 
 **`mentions.jsonl`** — enum values marked with `*` are unused now and filled by the GPU
 stage later:
@@ -323,6 +330,38 @@ questions*.
 
 ## Changelog
 
+- 2026-09-28 — **fixed: `senter` mis-splits sentences at an open `[`, truncating
+  them.** Surfaced by a spec 0004 diagnostic: candidate
+  `Q3760460:3:4:Q3760460:Q1922193`'s sentence ended "...formed by Congressman Mervyn
+  [" — the real text is "Mervyn [M.] Dymally", a bracketed middle initial inside a
+  wikilink's display text. `senter` predicts a sentence boundary right at the `[`
+  (also seen after a quote mark introducing an editorial `[...]` insertion in a
+  quotation) more often than the text warrants, silently discarding the rest of the
+  sentence into a following fragment that no longer reads as one. This compounded
+  with the HTML-comment leak fixed in spec 0001's Changelog — un-rendered
+  `[[File:...]]`/`[[Page]]` wikitext syntax in leaked comments produced its own
+  false brackets — so a chunk of the affected cases at this layer were actually
+  0001's bug wearing this one's symptom. Measured on the current (pre-fix, both
+  bugs present) `sentences.jsonl`: **1,681 of 384,656 sentences (0.44%)** end on an
+  unclosed `[`; on `candidates.jsonl`: **135 of 76,205 candidates (0.18%)** carry a
+  truncated sentence — not the ~31 an initial spot check estimated.
+  Fixed by merging consecutive `senter`-predicted sentences while a `[` is left
+  unclosed, capped at `MAX_BRACKET_MERGE = 4` merges (99.4% of affected groups
+  resolve within that, chosen from the corpus's own merge-chain-length
+  distribution) so a genuinely unclosed `[` typo in a source article — found one,
+  `Q18927072`: "born in ... on [September 15, 1931" and grew up..." never closes in
+  that paragraph — cannot swallow the rest of it.
+  Re-ran `clean` (spec 0001's fix) → `segment` → `mentions` end to end on the full
+  corpus: **382,404 sentences** (1,452 produced by a merge), **76,216 candidates,
+  0 affected** by the truncation symptom (down from 135) — one residual sentence
+  (not part of any candidate) still ends unclosed, a five-bracket run in `Q524252`
+  one merge past the cap; left as a documented, capped residual rather than raising
+  the cap further. Regression tests: `test_bracket_split_is_merged_back_together`,
+  `test_bracket_merge_is_capped` in `tests/test_segment.py`.
+  **Not yet promoted**: this rerun was written to a scratch directory to measure the
+  fix, not into `data/interim/{corpus_acquisition,entity_mention_layer}/` as a new
+  `{version}` — that regeneration (and the `data_versions.json` bump) is a
+  deliberate follow-up, not done as part of this fix.
 - 2026-08-12 — created.
 - 2026-08-25 — pass 2 rewritten from `wbgetentities` (~1,954 requests) to chunked SPARQL
   `VALUES` (~60), split into a cheap human filter plus a metadata query over the humans
@@ -343,3 +382,8 @@ questions*.
     uncapped. `link_link` fell 30,612 → 17,492.
 - 2026-08-26 — full corpus built: 74,149 mentions, 32,546 people, 76,205 candidate pairs;
   deterministic across runs; 74 tests passing.
+- 2026-09-28 — this layer's outputs moved from the flat `data/interim/` into
+  `data/interim/entity_mention_layer/{version}/` (starting at `0.0.1`), reading spec
+  0001's `documents.jsonl` from its own versioned directory. `.gitignore`'s negation for
+  `wikidata_cache.jsonl.gz` updated to match any version. See `data_versions.json` and
+  AGENTS.md §4.

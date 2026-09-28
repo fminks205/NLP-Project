@@ -150,3 +150,43 @@ def test_underscores_and_encoding_in_targets():
 def test_empty_sections_are_skipped():
     html = _wrap('<table class="infobox"><tr><td>only a table</td></tr></table>')
     assert parse_html(html) == []
+
+
+def test_html_comments_are_not_included_as_prose():
+    """Regression: HTML comments (bs4 ``Comment``) are a ``NavigableString``
+    subclass, so ``_walk``'s ``isinstance(child, NavigableString)`` check used to
+    treat an editor's "deleted image removed" note — raw, un-rendered wikitext —
+    as real prose. Found via a sentence truncated mid-word at a literal ``[``:
+    the source paragraph carried a ``<!-- Deleted image removed: [[File:...]] -->``
+    comment the cleaner was folding into the text.
+    """
+    html = _wrap(
+        "<p>Salehi was appointed in 2010."
+        "<!-- Deleted image removed: [[File:Geneva talks.JPG|thumb|Salehi and "
+        "[[Ernest Moniz]] in 2015]] -->"
+        " A day after, Rouhani appointed Salehi as head of the AEOI.</p>"
+    )
+    (section,) = parse_html(html)
+    assert "Deleted image removed" not in section["text"]
+    assert "File:" not in section["text"]
+    assert section["text"] == (
+        "Salehi was appointed in 2010. A day after, Rouhani appointed Salehi as "
+        "head of the AEOI."
+    )
+
+
+def test_comment_spanning_multiple_paragraphs_is_removed():
+    """A large block of disabled wikitext (an editor's "move this out" note) can
+    span what looks like several paragraphs inside one HTML comment — it must not
+    leak any of it, and must not confuse paragraph splitting either."""
+    html = _wrap(
+        "<p>Real lead prose.</p>"
+        "<p>Kept paragraph.<!-- Suggest we move this:\n\n"
+        "<p>Some old draft paragraph with [[Wikilink|display]] text.</p>\n\n"
+        "More draft prose.\n--> Continues here.</p>"
+    )
+    sections = parse_html(html)
+    text = "\n\n".join(s["text"] for s in sections)
+    assert "Suggest we move" not in text
+    assert "draft paragraph" not in text
+    assert "Continues here." in text

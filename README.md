@@ -16,6 +16,7 @@ reproducible pipeline.
 |---------|------|
 | An AI agent | **[AGENTS.md](AGENTS.md)** — first, always |
 | A human contributor | [AGENTS.md](AGENTS.md), then [docs/specs/](docs/specs/) |
+| Writing the paper's Methods section | [docs/methodology.md](docs/methodology.md) — a standing digest of pipeline steps, technology, and configuration, kept in sync with the specs and code |
 
 ## How this repo works
 
@@ -26,18 +27,22 @@ recorded decision. See [docs/specs/README.md](docs/specs/README.md).
 
 ## Pipeline
 
-Seven `inpnet` commands turn a Wikidata query into candidate relation sentences grouped
-into field-agnostic clusters. Each stage reads one directory and writes another — no
-stage overwrites its own input, so a bug in stage *N* never forces re-running stage
-*N − 1* — and every stage writes a `_manifest.json` beside its output recording inputs,
-config, tool versions and counts.
+`inpnet` commands turn a Wikidata query into candidate relation sentences, each broken
+into typed attribute spans and assembled into schemaless relation records. Each stage
+reads one directory and writes another — no stage overwrites its own input, so a bug in
+stage *N* never forces re-running stage *N − 1* — and every stage writes a
+`_manifest.json` beside its output recording inputs, config, tool versions and counts.
 
 ```
-seed → fetch → clean → resolve → segment → mentions → cluster
-└──────── spec 0001 ────────┘└──── spec 0002 ────┘  spec 0003
+seed → fetch → clean → resolve → segment → mentions → detect-attributes → assemble-relations
+└──────── spec 0001 ────────┘└──── spec 0002 ────┘  └── spec 0004 ──┘   └──── spec 0005 ────┘
 ```
 
-All seven stages have been run on the full corpus.
+`cluster` (spec 0003) is **superseded** by `detect-attributes`/`assemble-relations` — see
+[spec 0003's Changelog](docs/specs/0003-relation-typology.md) — but its code and command
+are kept for reruns/ablation, not removed.
+
+All stages have been run on the full corpus.
 
 All stages that hit a live API (`seed`, `fetch`, `resolve`) require a `--contact` address
 or `INPNET_CONTACT` env var — Wikimedia's User-Agent policy requires one — and rate-limit
@@ -178,6 +183,83 @@ UMAP/HDBSCAN settings against that one embedding, so comparing hyperparameters c
 seconds per combo instead of minutes. `--show-exemplars N` expands the N most-balanced
 combos with real sentences to read, not just cluster-size statistics. See
 `src/inpnet/relations/diagnostics.py`.
+
+**Note:** `cluster` (spec 0003) is superseded by `detect-attributes`/`assemble-relations`
+below (spec 0003's own clusters kept on cohering around a shared place or topic rather
+than a shared relation type, even after person-masking — see
+[finding 0002](docs/findings/0002-entity-masking-effect-on-relation-clustering.md) and
+spec 0003's Changelog). Kept runnable for reruns/ablation, not removed.
+
+### 8. `detect-attributes` — candidate sentences → typed attribute spans
+
+```bash
+inpnet detect-attributes
+```
+
+**Reads:** `data/interim/entity_mention_layer/{version}/{candidates,entities,sentences}.jsonl`.
+**Writes:** `data/interim/attribute_spans/{version}/attribute_spans.jsonl`.
+
+Runs spaCy's `en_core_web_sm` with `parser`+`ner` enabled (spec 0002/0003 only ever
+needed `senter`) over each unique candidate sentence. `time`/`place`/`institution` come
+directly from NER labels (`DATE`, `GPE`/`LOC`/`FAC`, `ORG`); `action` is the shortest
+dependency-parse path between the two participant tokens of a specific candidate
+pair — pair-scoped, not sentence-scoped, since the same sentence can name several pairs
+with different actions between them. See
+[spec 0004](docs/specs/0004-relation-attribute-detection.md).
+
+**A `0.0.1` full-corpus run found `action` for only 55.7% of pairs.** A diagnostic over
+all 33,758 misses traced 95.6% of them to one cause: a `subject_link` candidate whose
+subject is referred to only by pronoun in that sentence ("He did doctoral research
+under...") — spec 0002's already-documented coreference gap, just never quantified
+before (it's **42.4% of every candidate pair in the corpus**). `0.0.2` adds an
+accepted-for-now, explicitly flagged heuristic: assume the earliest third-person pronoun
+in the sentence refers to the subject (gender-aware where `entities.jsonl`'s `gender`
+field is known). This is a real pitfall, not a fix — a sentence can pronoun-reference
+someone else entirely — so every affected row/record carries `pronoun_resolved: true`
+rather than looking identical to a verified match.
+
+**Measured (`0.0.2`):** 43,664 unique sentences, 76,205 candidate pairs → **154,429
+attribute spans** (institution 41,541, time 28,702, place 18,743, action 65,443).
+`action` found for **85.9%** of candidate pairs (up from 55.7% in `0.0.1`), of which
+**35.2%** (23,010 of 65,443) rest on the pronoun heuristic. Where found, `action` spans
+average **94 characters** against a ~187-character average sentence — the enclosing-span
+the parse path resolves to is often about half the sentence, broader than a tight verb
+phrase like "worked with"; a real, measured characteristic of this heuristic, not a bug.
+The remaining ~14% miss is now mostly genuine non-verbal/appositive relations ("his son,
+the diplomat...") plus two small, separately-tracked spec 0001/0002 cleaning bugs (see
+spec 0004's Open questions) — `0.0.1`'s output is kept for comparison.
+
+### 9. `assemble-relations` — participants + spans → schemaless relation records
+
+```bash
+inpnet assemble-relations
+```
+
+**Reads:** `candidates.jsonl`, `entities.jsonl`, `sentences.jsonl` (spec 0002),
+`attribute_spans.jsonl` (spec 0004). **Writes:**
+`data/interim/relations/{version}/relations.jsonl`,
+`low_coverage_relations.jsonl`, plus a human-readable `.txt` rendering of each
+(`relations_summary.txt`, `low_coverage_relations_summary.txt`) — every relation shown
+with its typed attributes inline *and* whichever part of the sentence wasn't captured by
+anything, spelled out rather than left implicit in a coverage number.
+
+One record per candidate pair: its two participants plus whatever `time`/`place`/
+`institution`/`action` attributes spec 0004 found in its sentence, in an open
+`attributes` list rather than fixed columns — a new domain's attribute type is a new
+`attr_type` value, not a schema migration. `coverage` (fraction of the sentence's content
+tokens actually inside some participant or attribute span) below `--min-coverage`
+(default `0.5`) routes a record to `low_coverage_relations.jsonl` instead of
+`relations.jsonl`, so a detector gap is visible rather than silently kept or dropped. See
+[spec 0005](docs/specs/0005-schemaless-relation-attributes.md).
+
+**Measured (`0.0.2`):** 76,205 candidate pairs → **51,148 relations**, **25,057
+low-coverage** (32.9%, down from 50.4% in `0.0.1`, at the `0.5` default threshold — a
+proposal to tune once this distribution was actually visible, same posture spec 0003
+took with its own hyperparameters), mean coverage 0.624 (up from 0.510). **30.3%**
+(23,091 of 76,205) of records carry `pronoun_resolved: true` — visible per-record, not
+just as an aggregate, and rendered in `relations_summary.txt` as `[pronoun-resolved
+participant -- heuristic, unverified]` so it can't be mistaken for a verified match.
+Determinism reconfirmed end to end at `0.0.2` (byte-identical rerun of both stages).
 
 ## Dependencies
 
