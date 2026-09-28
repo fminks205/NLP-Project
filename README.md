@@ -6,6 +6,12 @@ nodes are people, edges are typed social relations.
 
 > *A disagreed with B · C worked with D*
 
+**[→ See a rendered example graph](https://htmlpreview.github.io/?https://github.com/fminks205/NLP-Project/blob/main/yale_subset_result.html)**
+— an institution-filtered subgraph (people connected by a relation mentioning "Yale"),
+rendered via Graphviz with hover tooltips per attribute ([spec 0006](docs/specs/0006-graph-visualization.md)).
+GitHub doesn't render `.html` files inline, so this link goes through
+[htmlpreview.github.io](https://htmlpreview.github.io) to show it live instead of raw source.
+
 FH-SWF, Angewandte Künstliche Intelligenz (AKI). The deliverable is a paper plus a
 reproducible pipeline.
 
@@ -88,7 +94,7 @@ inpnet clean
 ```
 
 **Needs:** `beautifulsoup4`, `lxml`. **Reads:** `data/raw/html/`, `data/raw/seed.jsonl`.
-**Writes:** `data/interim/documents.jsonl`.
+**Writes:** `data/interim/corpus_acquisition/{version}/documents.jsonl`.
 
 Strips infoboxes, navboxes, tables, reference lists and similar boilerplate, keeping
 prose paragraphs and section headings. Wiki-links are kept as **character offsets** into
@@ -102,9 +108,9 @@ plain prose and still recover exactly which span links to which article. **Measu
 inpnet resolve --contact you@example.org
 ```
 
-**Needs:** `requests`. **Reads:** `data/interim/documents.jsonl`. **Writes:**
-`data/interim/wikidata_cache.jsonl` (+ `wikidata_cache.jsonl.gz`, tracked in git as the
-citable snapshot).
+**Needs:** `requests`. **Reads:** `data/interim/corpus_acquisition/{version}/documents.jsonl`.
+**Writes:** `data/interim/entity_mention_layer/{version}/wikidata_cache.jsonl`
+(+ `wikidata_cache.jsonl.gz`, tracked in git as the citable snapshot).
 
 Resolves every distinct link target (title → QID → `P31 = Q5`) via chunked SPARQL, so
 downstream stages know which links point at people versus places, institutions, awards,
@@ -119,8 +125,8 @@ inpnet segment
 ```
 
 **Needs:** `spacy` + `en_core_web_sm` (core install; only the `senter` pipe runs — no
-NER, no parser). **Reads:** `data/interim/documents.jsonl`. **Writes:**
-`data/interim/sentences.jsonl`.
+NER, no parser). **Reads:** `data/interim/corpus_acquisition/{version}/documents.jsonl`.
+**Writes:** `data/interim/entity_mention_layer/{version}/sentences.jsonl`.
 
 Sentence boundaries are needed to scope candidate pairs (§6) to "mentioned in the same
 sentence" rather than "mentioned in the same 10,000-character section." Runs **per
@@ -134,9 +140,10 @@ sentences.
 inpnet mentions
 ```
 
-**Needs:** core install only. **Reads:** `documents.jsonl`, `sentences.jsonl`,
-`wikidata_cache.jsonl`, `seed.jsonl`. **Writes:** `data/interim/mentions.jsonl`,
-`data/interim/entities.jsonl`, `data/interim/candidates.jsonl`.
+**Needs:** core install only. **Reads:** `data/interim/corpus_acquisition/{version}/documents.jsonl`,
+`data/raw/seed.jsonl`, and from `data/interim/entity_mention_layer/{version}/`:
+`sentences.jsonl`, `wikidata_cache.jsonl`. **Writes (same directory):** `mentions.jsonl`,
+`entities.jsonl`, `candidates.jsonl`.
 
 Two rules generate candidate person-pairs: a linked person paired with the article's own
 subject (an article's subject is rarely linked in its own article, so it's added as an
@@ -147,7 +154,8 @@ between the *listed* people). **Fails hard** if `wikidata_cache.jsonl` doesn't c
 corpus's link targets, rather than silently producing a near-empty graph (`--lenient` to
 downgrade to a warning for deliberate subset runs). **Measured:** 74,149 mentions
 (58,991 link + 15,158 subject), 32,546 people (15,158 seed physicists + 17,388 others),
-**76,205 candidate person-pairs** — the input to clustering.
+**76,205 candidate person-pairs** — the shared input to both the superseded `cluster`
+stage and to `detect-attributes`/`assemble-relations` below.
 
 ### 7. `cluster` — candidate sentences → field-agnostic clusters
 
@@ -156,9 +164,10 @@ inpnet cluster --cluster-selection-method leaf --n-neighbors 15 --n-components 1
 ```
 
 **Needs:** the `relations` extra (`uv sync --extra relations` — see
-[Dependencies](#dependencies)). **Reads:** `data/interim/candidates.jsonl`. **Writes:**
-`data/interim/sentence_embeddings.npy`, `sentence_ids.jsonl`, `relation_clusters.jsonl`,
-`cluster_summary.jsonl`.
+[Dependencies](#dependencies)). **Reads:** `data/interim/entity_mention_layer/{version}/candidates.jsonl`
+(plus `mentions.jsonl`/`entities.jsonl` for entity masking). **Writes:**
+`data/interim/relation_typology/{version}/sentence_embeddings.npy`, `sentence_ids.jsonl`,
+`relation_clusters.jsonl`, `cluster_summary.jsonl`.
 
 Deliberately does **not** assign relation labels. The 76,205 candidate pairs collapse to
 43,664 distinct sentences (a sentence naming 3+ people yields several pairs); each is
